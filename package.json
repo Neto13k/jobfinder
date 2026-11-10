@@ -1,0 +1,21 @@
+{
+  "name": "jobfinder",
+  "version": "1.0.0",
+  "description": "Bot de busca de vagas de tecnologia que utiliza APIs e inteligência artificial para identificar oportunidades compatíveis com o perfil profissional e enviar notificações pelo Telegram.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Neto13k/jobfinder.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Neto13k/jobfinder/issues"
+  },
+  "homepage": "https://github.com/Neto13k/jobfinder#readme"
+}
