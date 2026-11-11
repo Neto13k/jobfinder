@@ -30,7 +30,9 @@ interface GreenhouseJobsResponse {
  * @throws {Error} Se a resposta HTTP for de erro.
  */
 export async function fetchGreenhouseJobs(boardToken: string): Promise<Job[]> {
-  const response = await fetch(`${API_BASE_URL}/${boardToken}/jobs`);
+  const response = await fetch(
+    `${API_BASE_URL}/${encodeURIComponent(boardToken)}/jobs?content=true`
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -52,7 +54,6 @@ export async function fetchGreenhouseJobs(boardToken: string): Promise<Job[]> {
       description: job.content ?? "",
       url: job.absolute_url,
       source: SOURCE,
-      publishedAt: job.updated_at,
     };
   });
 }
