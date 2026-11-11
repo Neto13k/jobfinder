@@ -13,4 +13,9 @@ coverage/
 dist/
 build/
 
+# Histórico de vagas já notificadas
+data/
+
 .DS_Store
+
+
