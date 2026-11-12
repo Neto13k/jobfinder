@@ -1,4 +1,5 @@
 import { JOB_SOURCES, type JobSource } from "./config/job-sources.js";
+import { fetchAshbyJobs } from "./providers/ashby.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
@@ -30,10 +31,19 @@ type NextAction =
  */
 async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
   try {
-    const jobs =
-      source.provider === "greenhouse"
-        ? await fetchGreenhouseJobs(source.identifier)
-        : await fetchLeverJobs(source.identifier);
+    let jobs: Job[];
+
+    switch (source.provider) {
+      case "greenhouse":
+        jobs = await fetchGreenhouseJobs(source.identifier);
+        break;
+      case "lever":
+        jobs = await fetchLeverJobs(source.identifier);
+        break;
+      case "ashby":
+        jobs = await fetchAshbyJobs(source.identifier);
+        break;
+    }
 
     console.log(
       `${source.provider} (${source.identifier}): ${jobs.length} vagas coletadas`,
@@ -68,7 +78,12 @@ async function findNextAction(jobs: Job[]): Promise<NextAction | undefined> {
     }
 
     // Incompatível ou revisão já resolvida: nada a fazer.
-    if (saved.decision !== "compatible") {
+    if (
+      saved.decision !== "compatible" ||
+      saved.locationStatus !== "allowed" ||
+      saved.contractStatus !== "allowed" ||
+      !SEND_NOTIFICATIONS
+    ) {
       continue;
     }
 

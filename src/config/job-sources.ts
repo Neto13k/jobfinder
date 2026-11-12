@@ -1,5 +1,5 @@
 /** Plataformas de vagas suportadas. */
-export type JobProvider = "greenhouse" | "lever";
+export type JobProvider = "greenhouse" | "lever" | "ashby";
 
 /** Fonte de vagas de uma empresa em uma plataforma. */
 export interface JobSource {
@@ -11,4 +11,5 @@ export interface JobSource {
 export const JOB_SOURCES: readonly JobSource[] = [
   { provider: "greenhouse", identifier: "stripe" },
   { provider: "lever", identifier: "Flex" },
+  { provider: "ashby", identifier: "Ashby" },
 ];
