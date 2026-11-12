@@ -1,3 +1,4 @@
+import { JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
@@ -16,11 +17,6 @@ import { filterBySeniority } from "./services/seniority-filter.js";
 import { sendJobNotification } from "./services/telegram.js";
 import type { Job } from "./types/job.js";
 
-// Fontes consultadas nesta etapa (MVP 1.0). "leverdemo" é ignorado por conter
-// vagas fictícias.
-const GREENHOUSE_BOARD_TOKEN = "stripe";
-const LEVER_SITE_NAME = "Flex";
-
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
 const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
 
@@ -29,16 +25,26 @@ type NextAction =
   | { kind: "analyze"; job: Job }
   | { kind: "send"; job: Job; analysis: JobAnalysis };
 
-/** Coleta de um provider, isolando a falha para não derrubar os demais. */
-async function collectJobs(
-  name: string,
-  fetchJobs: () => Promise<Job[]>,
-): Promise<Job[]> {
+/**
+ * Coleta as vagas de uma fonte, isolando a falha para não derrubar as demais.
+ */
+async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
   try {
-    return await fetchJobs();
+    const jobs =
+      source.provider === "greenhouse"
+        ? await fetchGreenhouseJobs(source.identifier)
+        : await fetchLeverJobs(source.identifier);
+
+    console.log(
+      `${source.provider} (${source.identifier}): ${jobs.length} vagas coletadas`,
+    );
+
+    return jobs;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`Falha ao coletar vagas da ${name}: ${message}`);
+    console.error(
+      `Falha ao coletar da fonte ${source.provider} (${source.identifier}): ${message}`,
+    );
     return [];
   }
 }
@@ -73,24 +79,16 @@ async function findNextAction(jobs: Job[]): Promise<NextAction | undefined> {
 }
 
 /**
- * Coleta das plataformas, filtra, analisa uma vaga e (opcionalmente) notifica.
+ * Coleta das fontes, filtra, analisa uma vaga e (opcionalmente) notifica.
  *
  * No máximo uma nova chamada à IA e uma notificação por execução.
  */
 async function main() {
   try {
-    const [greenhouseJobs, leverJobs] = await Promise.all([
-      collectJobs("Greenhouse", () =>
-        fetchGreenhouseJobs(GREENHOUSE_BOARD_TOKEN),
-      ),
-      collectJobs("Lever", () => fetchLeverJobs(LEVER_SITE_NAME)),
-    ]);
-
-    console.log(`Greenhouse: ${greenhouseJobs.length} vagas coletadas`);
-    console.log(`Lever: ${leverJobs.length} vagas coletadas`);
+    const collected = await Promise.all(JOB_SOURCES.map(fetchJobsFromSource));
 
     // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
-    const jobs = [...greenhouseJobs, ...leverJobs];
+    const jobs = collected.flat();
     const uniqueJobs = deduplicateJobs(jobs);
     const developerJobs = filterDeveloperJobs(uniqueJobs);
     const seniorityJobs = filterBySeniority(developerJobs);
