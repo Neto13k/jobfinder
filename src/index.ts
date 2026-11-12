@@ -1,4 +1,5 @@
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
+import { fetchLeverJobs } from "./providers/lever.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
 import {
   getAnalyzedJob,
@@ -15,8 +16,10 @@ import { filterBySeniority } from "./services/seniority-filter.js";
 import { sendJobNotification } from "./services/telegram.js";
 import type { Job } from "./types/job.js";
 
-/** Quadro consultado nesta etapa (MVP 1.0). */
-const BOARD_TOKEN = "stripe";
+// Fontes consultadas nesta etapa (MVP 1.0). "leverdemo" é ignorado por conter
+// vagas fictícias.
+const GREENHOUSE_BOARD_TOKEN = "stripe";
+const LEVER_SITE_NAME = "Flex";
 
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
 const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
@@ -25,6 +28,20 @@ const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
 type NextAction =
   | { kind: "analyze"; job: Job }
   | { kind: "send"; job: Job; analysis: JobAnalysis };
+
+/** Coleta de um provider, isolando a falha para não derrubar os demais. */
+async function collectJobs(
+  name: string,
+  fetchJobs: () => Promise<Job[]>,
+): Promise<Job[]> {
+  try {
+    return await fetchJobs();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Falha ao coletar vagas da ${name}: ${message}`);
+    return [];
+  }
+}
 
 /**
  * Encontra a primeira vaga que precisa de ação.
@@ -56,13 +73,24 @@ async function findNextAction(jobs: Job[]): Promise<NextAction | undefined> {
 }
 
 /**
- * Coleta, filtra, analisa uma vaga e (opcionalmente) notifica.
+ * Coleta das plataformas, filtra, analisa uma vaga e (opcionalmente) notifica.
  *
  * No máximo uma nova chamada à IA e uma notificação por execução.
  */
 async function main() {
   try {
-    const jobs = await fetchGreenhouseJobs(BOARD_TOKEN);
+    const [greenhouseJobs, leverJobs] = await Promise.all([
+      collectJobs("Greenhouse", () =>
+        fetchGreenhouseJobs(GREENHOUSE_BOARD_TOKEN),
+      ),
+      collectJobs("Lever", () => fetchLeverJobs(LEVER_SITE_NAME)),
+    ]);
+
+    console.log(`Greenhouse: ${greenhouseJobs.length} vagas coletadas`);
+    console.log(`Lever: ${leverJobs.length} vagas coletadas`);
+
+    // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
+    const jobs = [...greenhouseJobs, ...leverJobs];
     const uniqueJobs = deduplicateJobs(jobs);
     const developerJobs = filterDeveloperJobs(uniqueJobs);
     const seniorityJobs = filterBySeniority(developerJobs);
