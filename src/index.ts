@@ -13,6 +13,7 @@ import {
   markJobAsNotified,
 } from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
+import { prioritizeJobs } from "./services/job-priority.js";
 import { filterByLocation } from "./services/location-filter.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
 import { sendJobNotification } from "./services/telegram.js";
@@ -108,13 +109,15 @@ async function main() {
     const developerJobs = filterDeveloperJobs(uniqueJobs);
     const seniorityJobs = filterBySeniority(developerJobs);
     const eligibleJobs = filterByLocation(seniorityJobs);
+    // Ordena por prioridade geográfica sem descartar vagas elegíveis.
+    const prioritizedJobs = prioritizeJobs(eligibleJobs);
 
     console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
     console.log(`Desenvolvimento: ${developerJobs.length}`);
     console.log(`Após senioridade: ${seniorityJobs.length}`);
     console.log(`Após localização: ${eligibleJobs.length}`);
 
-    const action = await findNextAction(eligibleJobs);
+    const action = await findNextAction(prioritizedJobs);
     if (!action) {
       console.log("Nenhuma vaga pendente para processamento.");
       return;
