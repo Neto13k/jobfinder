@@ -15,12 +15,20 @@ import {
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
 import { filterByLocation } from "./services/location-filter.js";
+import { classifyNotification } from "./services/notification-policy.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
-import { sendJobNotification } from "./services/telegram.js";
+import {
+  sendJobNotification,
+  sendReviewNotification,
+} from "./services/telegram.js";
 import type { Job } from "./types/job.js";
 
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
 const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
+
+// Revisão manual exige o envio geral habilitado; desativada por padrão.
+const SEND_REVIEWS =
+  SEND_NOTIFICATIONS && process.env.JOBFINDER_SEND_REVIEWS === "true";
 
 // Limite de novas análises por execução: padrão 1, teto de 5.
 const DEFAULT_MAX_ANALYSES = 1;
@@ -54,7 +62,14 @@ interface RunSummary {
   compatible: number;
   incompatible: number;
   review: number;
-  notified: number;
+  sentCompatible: number;
+  sentReview: number;
+}
+
+/** Vaga escolhida para notificação, com a análise correspondente. */
+interface NotificationCandidate {
+  job: Job;
+  analysis: JobAnalysis;
 }
 
 /**
@@ -91,11 +106,11 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
 }
 
 /**
- * Processa as vagas na ordem recebida.
+ * Processa as vagas na ordem recebida (prioridade geográfica).
  *
- * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (sem nova
- * chamada à IA), ignora vagas já notificadas e envia no máximo uma notificação
- * por execução. Cada nova análise é salva imediatamente.
+ * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (inclusive
+ * as marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
+ * notificação por execução, priorizando as vagas compatíveis.
  */
 async function processJobs(jobs: Job[]): Promise<RunSummary> {
   const summary: RunSummary = {
@@ -103,16 +118,20 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
     compatible: 0,
     incompatible: 0,
     review: 0,
-    notified: 0,
+    sentCompatible: 0,
+    sentReview: 0,
   };
 
+  // Candidatos pendentes, na ordem de prioridade em que aparecem.
+  let compatibleCandidate: NotificationCandidate | undefined;
+  let reviewCandidate: NotificationCandidate | undefined;
+
   for (const job of jobs) {
-    // Limite de análises atingido e nenhum envio pendente: encerra o laço.
-    if (
-      summary.analyzed >= MAX_ANALYSES &&
-      (!SEND_NOTIFICATIONS || summary.notified >= 1)
-    ) {
-      break;
+    // Limite de análises atingido: só continua se ainda houver envio pendente.
+    if (summary.analyzed >= MAX_ANALYSES) {
+      if (!SEND_NOTIFICATIONS || compatibleCandidate) {
+        break;
+      }
     }
 
     if (await isJobNotified(job)) {
@@ -121,11 +140,9 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
 
     // Reaproveita a análise salva; só chama a IA quando não houver resultado.
     let analysis: JobAnalysis | undefined = await getAnalyzedJob(job);
-    const isReused = analysis !== undefined;
 
     if (!analysis) {
-      // Limite de novas análises atingido: não chama o Gemini, mas segue
-      // verificando vagas já analisadas e ainda pendentes de envio.
+      // Sem resultado salvo e limite atingido: não chama o Gemini.
       if (summary.analyzed >= MAX_ANALYSES) {
         continue;
       }
@@ -150,27 +167,31 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
         `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus}`,
     );
 
-    const isSendable =
-      analysis.decision === "compatible" &&
-      analysis.locationStatus === "allowed" &&
-      analysis.contractStatus === "allowed";
+    const kind = classifyNotification(analysis);
 
-    // Uma notificação por execução; análises aprovadas ficam salvas para depois.
-    if (!isSendable || !SEND_NOTIFICATIONS || summary.notified >= 1) {
-      continue;
+    // Compatível tem prioridade; revisão só conta quando habilitada.
+    if (kind === "compatible" && SEND_NOTIFICATIONS && !compatibleCandidate) {
+      compatibleCandidate = { job, analysis };
+    } else if (kind === "manual_review" && SEND_REVIEWS && !reviewCandidate) {
+      reviewCandidate = { job, analysis };
     }
+  }
 
-    if (isReused) {
-      // Reaproveita o resultado salvo, sem chamar a IA novamente.
-      console.log(`Reutilizando análise salva: ${job.title} (${job.company})`);
-    }
-
+  // Uma notificação por execução: compatível antes de revisão manual.
+  if (compatibleCandidate) {
+    const { job, analysis } = compatibleCandidate;
     // Só registra como notificada após o Telegram confirmar o envio. Uma falha
     // aqui mantém a análise salva, permitindo nova tentativa.
     await sendJobNotification(job, analysis);
     await markJobAsNotified(job);
-    summary.notified++;
+    summary.sentCompatible++;
     console.log(`Notificação enviada: ${job.title} (${job.company})`);
+  } else if (reviewCandidate) {
+    const { job, analysis } = reviewCandidate;
+    await sendReviewNotification(job, analysis);
+    await markJobAsNotified(job);
+    summary.sentReview++;
+    console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
   }
 
   return summary;
@@ -204,7 +225,9 @@ async function main() {
     console.log(
       `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
         `${summary.compatible} compatível(is) | ${summary.incompatible} incompatível(is) | ` +
-        `${summary.review} em revisão | ${summary.notified} notificação(ões) enviada(s)`,
+        `${summary.review} em revisão | ` +
+        `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
+        `${summary.sentReview} notificação(ões) de revisão`,
     );
   } catch (error) {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
