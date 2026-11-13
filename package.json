@@ -1,12 +1,17 @@
 {
   "name": "jobfinder",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bot de busca de vagas de tecnologia que utiliza APIs e inteligência artificial para identificar oportunidades compatíveis com o perfil profissional e enviar notificações pelo Telegram.",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "npm run build && node scripts/test-filters.mjs && node scripts/test-storage.mjs && node scripts/test-dispatch.mjs",
+    "test:db": "npm run build && node --env-file=.env scripts/test-postgres-storage.mjs",
+    "db:migrate": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
+    "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs --dry-run",
+    "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs"
   },
   "repository": {
     "type": "git",
