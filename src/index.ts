@@ -7,20 +7,17 @@ import {
   getAnalyzedJob,
   markJobAsAnalyzed,
 } from "./services/analysis-history.js";
-import {
-  deduplicateJobs,
-  isJobNotified,
-  markJobAsNotified,
-} from "./services/deduplication.js";
+import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
 import { filterByLocation } from "./services/location-filter.js";
+import {
+  notifyWithReservation,
+  type NotificationCandidate,
+} from "./services/notification-dispatch.js";
 import { classifyNotification } from "./services/notification-policy.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
-import {
-  sendJobNotification,
-  sendReviewNotification,
-} from "./services/telegram.js";
+import { getStorageBackend } from "./services/storage.js";
 import type { Job } from "./types/job.js";
 
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
@@ -64,12 +61,6 @@ interface RunSummary {
   review: number;
   sentCompatible: number;
   sentReview: number;
-}
-
-/** Vaga escolhida para notificação, com a análise correspondente. */
-interface NotificationCandidate {
-  job: Job;
-  analysis: JobAnalysis;
 }
 
 /**
@@ -179,19 +170,17 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
 
   // Uma notificação por execução: compatível antes de revisão manual.
   if (compatibleCandidate) {
-    const { job, analysis } = compatibleCandidate;
-    // Só registra como notificada após o Telegram confirmar o envio. Uma falha
-    // aqui mantém a análise salva, permitindo nova tentativa.
-    await sendJobNotification(job, analysis);
-    await markJobAsNotified(job);
-    summary.sentCompatible++;
-    console.log(`Notificação enviada: ${job.title} (${job.company})`);
+    const { job } = compatibleCandidate;
+    if (await notifyWithReservation(compatibleCandidate, "compatible")) {
+      summary.sentCompatible++;
+      console.log(`Notificação enviada: ${job.title} (${job.company})`);
+    }
   } else if (reviewCandidate) {
-    const { job, analysis } = reviewCandidate;
-    await sendReviewNotification(job, analysis);
-    await markJobAsNotified(job);
-    summary.sentReview++;
-    console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
+    const { job } = reviewCandidate;
+    if (await notifyWithReservation(reviewCandidate, "manual_review")) {
+      summary.sentReview++;
+      console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
+    }
   }
 
   return summary;
@@ -218,6 +207,7 @@ async function main() {
     console.log(`Desenvolvimento: ${developerJobs.length}`);
     console.log(`Após senioridade: ${seniorityJobs.length}`);
     console.log(`Após localização: ${eligibleJobs.length}`);
+    console.log(`Armazenamento: ${getStorageBackend()}`);
     console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
 
     const summary = await processJobs(prioritizedJobs);
@@ -233,6 +223,8 @@ async function main() {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
     const message = error instanceof Error ? error.message : String(error);
     console.error("Erro na execução do JobFinder:", message);
+    // Sinaliza a falha para o GitHub Actions e para chamadas manuais.
+    process.exitCode = 1;
   }
 }
 
