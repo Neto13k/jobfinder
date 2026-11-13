@@ -1,0 +1,67 @@
+name: JobFinder
+
+# Execução automática a cada 15 minutos (UTC) e execução manual.
+# O agendamento do GitHub Actions pode atrasar e não é tempo real.
+#
+# O job agendado só roda quando a variável do repositório
+# JOBFINDER_AUTOMATION_ENABLED for "true" (padrão: desativado, sem chamadas ao
+# Gemini em agendamentos). A execução manual (workflow_dispatch) é sempre
+# permitida, para disparo controlado.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# Permissões mínimas: apenas leitura do repositório.
+permissions:
+  contents: read
+
+# Evita execuções simultâneas do JobFinder (reduz risco de notificações duplicadas).
+concurrency:
+  group: jobfinder
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Executar JobFinder
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Agendamento só executa com a automação habilitada; manual sempre executa.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.JOBFINDER_AUTOMATION_ENABLED == 'true' }}
+
+    env:
+      NODE_ENV: production
+      # Persistência na nuvem: nunca usar arquivos JSON locais no Actions.
+      JOBFINDER_STORAGE: postgres
+      # Limite de novas análises por execução (respeita a cota gratuita do Gemini).
+      JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '1' }}
+      # Envios desativados por padrão; ativar via variável do repositório.
+      JOBFINDER_SEND_NOTIFICATIONS: ${{ vars.JOBFINDER_SEND_NOTIFICATIONS || 'false' }}
+      JOBFINDER_SEND_REVIEWS: ${{ vars.JOBFINDER_SEND_REVIEWS || 'false' }}
+      # Certificado TLS público versionado no repositório.
+      DATABASE_CA_CERT_PATH: ./certs/prod-ca-2021.crt
+      # Segredos: nunca são impressos nos logs (mascarados pelo Actions).
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Compilar TypeScript
+        run: npm run build
+
+      - name: Executar JobFinder
+        # Falhas de banco, Gemini, providers ou Telegram aparecem na aba Actions.
+        run: node dist/index.js
