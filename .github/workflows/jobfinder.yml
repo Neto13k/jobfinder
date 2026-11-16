@@ -1,6 +1,6 @@
 name: JobFinder
 
-# Execução automática a cada 15 minutos (UTC) e execução manual.
+# Execução automática a cada 60 minutos (UTC) e execução manual.
 # O agendamento do GitHub Actions pode atrasar e não é tempo real.
 #
 # O job agendado só roda quando a variável do repositório
@@ -9,7 +9,7 @@ name: JobFinder
 # permitida, para disparo controlado.
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 # Permissões mínimas: apenas leitura do repositório.
