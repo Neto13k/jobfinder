@@ -11,7 +11,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 - **Persistência no PostgreSQL (Supabase):** históricos de análises e de notificações deixam os arquivos JSON locais e passam a viver em `public.analyzed_jobs` e `public.notified_jobs`, com consultas e gravações parametrizadas.
 - **Seleção explícita de armazenamento:** `JOBFINDER_STORAGE` escolhe entre `json` (padrão) e `postgres`, **sem fallback silencioso** — falhas do banco interrompem a execução.
 - **Controle de duplicações:** reserva da vaga antes do envio, com estados de entrega (`pending`/`sent`) e **propriedade da reserva** (`reserved_by`/`reserved_at`). Uma execução só confirma ou libera a reserva que ela mesma criou. A reserva é liberada **somente** quando há confirmação de que o Telegram **não** entregou a mensagem; resultados incertos e falhas de confirmação são mantidos como `pending`.
-- **Automação controlada com GitHub Actions:** execução agendada a cada 15 minutos (UTC) **desativada por padrão** (`JOBFINDER_AUTOMATION_ENABLED=false`), execução manual (`workflow_dispatch`) e controle de concorrência, sem depender de arquivos JSON locais.
+- **Automação controlada com GitHub Actions:** execução agendada **a cada hora, aos 17 minutos (`cron: "17 * * * *"`), em UTC**, **desativada por padrão** (`JOBFINDER_AUTOMATION_ENABLED=false`), execução manual (`workflow_dispatch`) e controle de concorrência, sem depender de arquivos JSON locais.
 - **Script de migração dos históricos:** importa os JSON existentes para o PostgreSQL com modo de simulação e importação idempotente, preservando os arquivos originais.
 - **Correção do filtro de estágios:** vagas como *Estágio em Desenvolvimento de Software* deixam de ser descartadas, mantendo o reconhecimento de desenvolvimento júnior/estágio em português e inglês.
 - **Testes automatizados:** filtros, persistência, deduplicação, concorrência e tratamento de falhas (`npm test`).
@@ -22,12 +22,13 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead) e localização.
 - Priorização geográfica das vagas, sem excluir oportunidades apenas por terem prioridade baixa.
-- Análise de até **1 a 5 novas vagas por execução**, conforme configuração, por meio do Gemini, reaproveitando análises salvas.
+- Análise de **no máximo uma nova vaga por execução** na configuração atual (valor padrão de `JOBFINDER_MAX_ANALYSES`, ajustável de `1` a `5`), por meio do Gemini, reaproveitando análises salvas.
 - Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
 - Notificações de vagas aprovadas via Telegram, quando habilitadas.
 - Alertas opcionais de **revisão manual** para vagas com localização permitida e contratação não informada, sem apresentá-las como confirmadas.
-- Execução **manual** (local) e **agendada** (GitHub Actions, desativada por padrão), com limite de uma notificação por execução.
+- Execução **manual** (local) e **agendada** (GitHub Actions, desativada por padrão), com limite de **uma notificação por execução**.
+- **Sem envio quando não há vagas elegíveis:** se nenhuma vaga passar pelos filtros, pela análise e pela política de notificação (ou se todas já tiverem sido notificadas), **nenhuma mensagem é enviada**.
 
 O JobFinder **não** envia currículos, não se candidata a vagas e não confirma por conta própria que os processos seletivos permanecem abertos.
 
@@ -78,7 +79,11 @@ O comando `cp` funciona no Git Bash, Linux e macOS. Edite o `.env` com suas cred
 | `DATABASE_CA_CERT_PATH` | Caminho do certificado CA do Supabase | `./certs/prod-ca-2021.crt` |
 | `JOBFINDER_RUN_DB_TESTS` | Autoriza testes que gravam no banco | `false` |
 
-O valor `true` deve ser escrito exatamente assim. Para ativar alertas de revisão manual, **as duas variáveis de envio** precisam ser `true`. O `JOBFINDER_AUTOMATION_ENABLED` controla apenas a execução **agendada**; a execução manual (`workflow_dispatch`) e a execução local não dependem dele. O arquivo `.env.example` contém somente valores de exemplo.
+O valor `true` deve ser escrito exatamente assim. Para ativar alertas de revisão manual, **as duas variáveis de envio** precisam ser `true`.
+
+Sobre a automação: `JOBFINDER_AUTOMATION_ENABLED=true` **habilita a execução automática** do job agendado do GitHub Actions; `false` é a **configuração segura padrão** e mantém os agendamentos inativos (sem chamadas ao Gemini e sem envios). Essa variável controla apenas a execução **agendada** — a execução manual (`workflow_dispatch`) e a execução local **não** dependem dela.
+
+O arquivo `.env.example` contém somente valores de exemplo.
 
 ## Persistência: JSON ou PostgreSQL
 
@@ -192,13 +197,13 @@ JOBFINDER_MAX_ANALYSES=3 JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env
 JOBFINDER_SEND_NOTIFICATIONS=true JOBFINDER_SEND_REVIEWS=false node --env-file=.env dist/index.js
 ```
 
-> **Atenção:** os comandos de envio podem enviar uma mensagem **real** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. A execução limita a saída a **uma notificação total por execução**, com prioridade para vagas compatíveis.
+> **Atenção:** os comandos de envio podem enviar uma mensagem **real** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. Na configuração atual, cada execução analisa **no máximo uma nova vaga** (padrão de `JOBFINDER_MAX_ANALYSES`) e envia **no máximo uma notificação**, com prioridade para vagas compatíveis. Se **não houver vagas elegíveis**, **nenhuma mensagem é enviada**.
 
 ## Automação com GitHub Actions
 
 O workflow `.github/workflows/jobfinder.yml` executa o JobFinder automaticamente:
 
-- **Agendamento:** a cada 15 minutos, em **UTC** (`cron: "*/15 * * * *"`), **desativado por padrão**.
+- **Agendamento:** **a cada hora, aos 17 minutos (`cron: "17 * * * *"`), em UTC**, **desativado por padrão**.
 - **Ativação controlada:** o job agendado só executa quando a variável de repositório `JOBFINDER_AUTOMATION_ENABLED` for `true`. Enquanto ela não existir ou for diferente de `true`, os agendamentos **não** chamam o Gemini nem enviam nada.
 - **Execução manual:** pela aba **Actions** do GitHub (`workflow_dispatch`), sempre permitida para disparo controlado.
 - **Concorrência:** `concurrency: jobfinder` evita execuções simultâneas.
@@ -206,8 +211,22 @@ O workflow `.github/workflows/jobfinder.yml` executa o JobFinder automaticamente
 - **Persistência:** `JOBFINDER_STORAGE=postgres`; não usa arquivos JSON locais.
 - **TLS:** usa o certificado versionado `certs/prod-ca-2021.crt` via `DATABASE_CA_CERT_PATH`.
 - **Envios desativados por padrão:** só enviam se as variáveis do repositório forem definidas como `true`.
+- **Sem envio sem vagas elegíveis:** se nenhuma vaga passar pelos filtros e pela análise (ou se todas já estiverem notificadas), a execução termina **sem enviar nenhuma mensagem**.
 
-> O agendamento do GitHub Actions **pode atrasar** e **não é tempo real**. Em repositórios sem atividade, execuções agendadas podem ser adiadas. Para diagnosticar falhas, verifique os logs na aba **Actions**.
+> O agendamento do GitHub Actions **pode atrasar** e **não é tempo real**. Para diagnosticar falhas, verifique os logs na aba **Actions**.
+
+### Teste manual do Telegram (Telegram Smoke Test)
+
+O workflow independente `.github/workflows/telegram-smoke.yml` valida o envio ao Telegram **manualmente**, sem envolver a rotina principal:
+
+- **Gatilho:** exclusivamente `workflow_dispatch` — **sem** `schedule`, `push` ou outros gatilhos automáticos.
+- **Passos:** `checkout` → Node.js 22 → `npm ci --include=dev` → `npm run build` → `node scripts/telegram-smoke.mjs`.
+- **Mensagem:** envia **uma única** mensagem fictícia, identificada como `TESTE — JobFinder GitHub Actions`, deixando claro que é apenas um teste técnico e **não** uma oportunidade real.
+- **Credenciais:** usa **somente** os Secrets `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`; reutiliza `sendJobNotification`, sem duplicar a lógica HTTP.
+- **Isolamento:** **não** consulta o Gemini, **não** acessa o PostgreSQL/Supabase, **não** lê nem grava históricos, **não** altera reservas de notificação e **não** usa `src/index.ts`.
+- **Segurança:** não imprime tokens nem chat IDs; encerra com código diferente de zero se o envio falhar.
+
+Para executá-lo: abra a aba **Actions**, selecione **Telegram Smoke Test** e clique em **Run workflow**. Este workflow **não** interfere na automação principal nem na variável `JOBFINDER_AUTOMATION_ENABLED`.
 
 ### GitHub Secrets (obrigatórios)
 
@@ -315,7 +334,9 @@ Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL
 
 ```text
 jobfinder/
-├── .github/workflows/jobfinder.yml    # Automação agendada (GitHub Actions)
+├── .github/workflows/
+│   ├── jobfinder.yml                  # Automação agendada (GitHub Actions)
+│   └── telegram-smoke.yml             # Teste manual de envio ao Telegram
 ├── certs/prod-ca-2021.crt             # Certificado CA público do Supabase
 ├── src/
 │   ├── config/job-sources.ts          # Quadros de vagas consultados
@@ -339,7 +360,7 @@ jobfinder/
 │   ├── types/job.ts
 │   └── index.ts
 ├── supabase/migrations/               # Migrations SQL
-├── scripts/                           # Testes e utilitários manuais
+├── scripts/                           # Testes e utilitários manuais (inclui telegram-smoke.mjs)
 ├── data/                              # Históricos JSON locais (não versionar)
 ├── .env.example                       # Referência de configuração, sem segredos
 ├── package.json
@@ -366,13 +387,14 @@ jobfinder/
 - **Fontes limitadas:** somente Greenhouse, Lever e Ashby; sem scraping do LinkedIn, Gupy, BNE, Indeed ou Catho nesta versão.
 - **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas; `remote: true` não significa disponibilidade no Brasil.
 - **Uma mensagem por execução:** oportunidades aprovadas adicionais ficam pendentes para execuções seguintes.
-- **Falhas parciais:** erros de banco, Gemini, providers ou Telegram são registrados; o JobFinder sinaliza a falha com código de saída diferente de zero e continua as fontes que forem seguras.
+- **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever ou Ashby) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
 
 ## Próximas versões (fora do escopo da v1.1)
 
 - Novos providers brasileiros (Apify/LinkedIn Jobs, LinkedIn Posts, Gupy, Indeed, InfoJobs, BNE), após validação de acesso e permissões.
-- Interface de frontend.
 - Observabilidade e testes de fluxo mais abrangentes.
+
+O JobFinder permanece **exclusivamente backend** — sem interface de frontend — e continua usando o **Telegram** para as notificações.
 
 ## Referências técnicas
 
