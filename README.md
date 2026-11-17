@@ -1,26 +1,36 @@
 # JobFinder
 
-**Versão 1.1 — Persistência, Automação e Estabilidade**
+**Versão 2.0 — LinkedIn Jobs + Indeed Jobs**
 
-O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadros públicos de empresas, aplica filtros de compatibilidade, utiliza o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
+O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadros públicos de empresas e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, utiliza o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v1.1 mantém a execução **manual** e local e adiciona **persistência no PostgreSQL (Supabase)** e **execução agendada pelo GitHub Actions**. Ela continua **não** realizando candidaturas, **não** integrando LinkedIn/Gupy/Indeed e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração.
+> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`), mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
 
-## Novidades da v1.1
+## Novidades da v2.0
 
-- **Persistência no PostgreSQL (Supabase):** históricos de análises e de notificações deixam os arquivos JSON locais e passam a viver em `public.analyzed_jobs` e `public.notified_jobs`, com consultas e gravações parametrizadas.
+- **LinkedIn Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **10 vagas por pesquisa**.
+- **Indeed Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **15 vagas por pesquisa**.
+- **Rotação determinística e sem estado:** as 100 pesquisas de cada plataforma são divididas em **20 lotes**; a cada execução são selecionados **5 pesquisas do LinkedIn e 5 do Indeed** (1 local de Maceió e 4 remotas nacionais por plataforma), escolhidas pela hora UTC e sem persistir estado.
+- **Coleta sequencial entre plataformas:** os lotes do LinkedIn e do Indeed rodam **um após o outro**, e cada lote executa **uma pesquisa por vez**, para não concorrerem na mesma sessão da biblioteca `ts-jobspy`.
+- **`patch-package` para `geoId`:** um patch local (`patches/ts-jobspy+3.0.1.patch`) habilita o parâmetro `geoId`, usado para fixar as pesquisas locais do LinkedIn em Maceió/AL.
+- **Mapeamento de falhas por plataforma:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente; falhas de um provider são isoladas e não derrubam as demais fontes.
+
+### Recursos herdados da v1.1 (mantidos)
+
+- **Persistência no PostgreSQL (Supabase):** históricos de análises e de notificações podem viver em `public.analyzed_jobs` e `public.notified_jobs`, com consultas e gravações parametrizadas.
 - **Seleção explícita de armazenamento:** `JOBFINDER_STORAGE` escolhe entre `json` (padrão) e `postgres`, **sem fallback silencioso** — falhas do banco interrompem a execução.
-- **Controle de duplicações:** reserva da vaga antes do envio, com estados de entrega (`pending`/`sent`) e **propriedade da reserva** (`reserved_by`/`reserved_at`). Uma execução só confirma ou libera a reserva que ela mesma criou. A reserva é liberada **somente** quando há confirmação de que o Telegram **não** entregou a mensagem; resultados incertos e falhas de confirmação são mantidos como `pending`.
-- **Automação controlada com GitHub Actions:** execução agendada **a cada hora, aos 17 minutos (`cron: "17 * * * *"`), em UTC**, **desativada por padrão** (`JOBFINDER_AUTOMATION_ENABLED=false`), execução manual (`workflow_dispatch`) e controle de concorrência, sem depender de arquivos JSON locais.
-- **Script de migração dos históricos:** importa os JSON existentes para o PostgreSQL com modo de simulação e importação idempotente, preservando os arquivos originais.
+- **Controle de duplicações:** reserva da vaga antes do envio, com estados de entrega (`pending`/`sent`) e **propriedade da reserva** (`reserved_by`/`reserved_at`).
+- **Automação controlada com GitHub Actions:** execução agendada **a cada hora, aos 17 minutos (`cron: "17 * * * *"`), em UTC**, **desativada por padrão** (`JOBFINDER_AUTOMATION_ENABLED=false`), execução manual (`workflow_dispatch`) e controle de concorrência.
+- **Script de migração dos históricos:** importa os JSON existentes para o PostgreSQL com modo de simulação e importação idempotente.
 - **Correção do filtro de estágios:** vagas como *Estágio em Desenvolvimento de Software* deixam de ser descartadas, mantendo o reconhecimento de desenvolvimento júnior/estágio em português e inglês.
 - **Testes automatizados:** filtros, persistência, deduplicação, concorrência e tratamento de falhas (`npm test`).
 
 ## Funcionalidades incluídas
 
 - Coleta de vagas nos job boards públicos **Greenhouse**, **Lever** e **Ashby**, por empresa configurada.
+- Coleta de vagas no **LinkedIn Jobs** e no **Indeed Jobs**, por termo de busca (júnior e estágio), com rotação de lotes por hora UTC.
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
-- Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead) e localização.
+- Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
 - Priorização geográfica das vagas, sem excluir oportunidades apenas por terem prioridade baixa.
 - Análise de **no máximo uma nova vaga por execução** na configuração atual (valor padrão de `JOBFINDER_MAX_ANALYSES`, ajustável de `1` a `5`), por meio do Gemini, reaproveitando análises salvas.
 - Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
@@ -36,6 +46,8 @@ O JobFinder **não** envia currículos, não se candidata a vagas e não confirm
 
 - Node.js, TypeScript e módulos ESM/NodeNext
 - APIs públicas de vagas da Greenhouse, Lever e Ashby
+- **`ts-jobspy@3.0.1`** para a coleta de vagas do LinkedIn Jobs e do Indeed Jobs
+- **`patch-package`** para o suporte a `geoId` nas pesquisas locais do LinkedIn
 - Google Gemini (`@google/genai`)
 - Telegram Bot API
 - PostgreSQL no Supabase (`pg`), com TLS validado
@@ -60,7 +72,7 @@ cp .env.example .env
 npm run build
 ```
 
-O comando `cp` funciona no Git Bash, Linux e macOS. Edite o `.env` com suas credenciais. **Nunca publique nem compartilhe esse arquivo.**
+O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch local em `ts-jobspy@3.0.1` para habilitar o `geoId`. O comando `cp` funciona no Git Bash, Linux e macOS. Edite o `.env` com suas credenciais. **Nunca publique nem compartilhe esse arquivo.**
 
 ### Variáveis de ambiente
 
@@ -84,6 +96,23 @@ O valor `true` deve ser escrito exatamente assim. Para ativar alertas de revisã
 Sobre a automação: `JOBFINDER_AUTOMATION_ENABLED=true` **habilita a execução automática** do job agendado do GitHub Actions; `false` é a **configuração segura padrão** e mantém os agendamentos inativos (sem chamadas ao Gemini e sem envios). Essa variável controla apenas a execução **agendada** — a execução manual (`workflow_dispatch`) e a execução local **não** dependem dela.
 
 O arquivo `.env.example` contém somente valores de exemplo.
+
+## Coleta de vagas (LinkedIn Jobs e Indeed Jobs)
+
+As pesquisas do LinkedIn e do Indeed são configuradas em `src/config/linkedin-searches.ts` e `src/config/indeed-searches.ts` e atendidas pelos providers `src/providers/linkedin.ts` e `src/providers/indeed.ts`, sobre a biblioteca `ts-jobspy@3.0.1`.
+
+| Plataforma | Pesquisas totais | Locais (Maceió/AL) | Remotas (Brasil) | Limite por pesquisa |
+|---|---|---|---|---|
+| LinkedIn Jobs | 100 | 20 | 80 | 10 vagas |
+| Indeed Jobs | 100 | 20 | 80 | 15 vagas |
+
+- **Rotação de lotes:** as 100 pesquisas de cada plataforma formam **20 lotes**; cada lote contém **1 pesquisa local de Maceió** e **4 pesquisas remotas nacionais**. A seleção é determinística e **sem estado**: converte a data atual em horas UTC absolutas e aplica módulo 20, então cada hora do calendário mapeia sempre para o mesmo lote e o ciclo se repete a cada 20 horas. As rotações do LinkedIn e do Indeed são independentes.
+- **Por execução:** são executadas **5 pesquisas do LinkedIn e 5 do Indeed** (10 no total). As 200 pesquisas **não** são executadas simultaneamente — a cobertura completa ocorre ao longo do ciclo de 20 horas.
+- **Coleta sequencial:** os lotes do LinkedIn e do Indeed são executados **um após o outro** e cada lote roda **uma pesquisa por vez**, pois ambos compartilham a mesma biblioteca `ts-jobspy` e pesquisas concorrentes entrariam em conflito.
+- **`geoId` via patch:** as pesquisas locais do LinkedIn fixam a cidade com `geoId` (`102957102` para Maceió/AL), suporte fornecido pelo patch `patches/ts-jobspy+3.0.1.patch`. A versão do `ts-jobspy` fica **fixada exatamente** (`3.0.1`) para garantir a compatibilidade do patch.
+- **Descrição completa:** o provider do LinkedIn busca a descrição completa de cada vaga (`fetchDescription: true`), necessária à análise da IA.
+- **Modalidade:** a modalidade é inferida dos sinais do próprio anúncio (título, localização e descrição), considerando termos em português, e não apenas o filtro de busca.
+- **Falhas isoladas:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente. Em `error`, a fonte falha isoladamente; em `partial`, as vagas já coletadas são preservadas e a interrupção é registrada. A falha de um provider não interrompe a execução.
 
 ## Persistência: JSON ou PostgreSQL
 
@@ -257,16 +286,16 @@ Para ativar o agendamento, defina `JOBFINDER_AUTOMATION_ENABLED=true`. Para ativ
 ## Fluxo de processamento
 
 ```text
-Fontes configuradas (Greenhouse, Lever, Ashby)
+Fontes (Greenhouse, Lever, Ashby, LinkedIn Jobs, Indeed Jobs)
                   |
                   v
-            Coleta das vagas
+   Coleta: boards em paralelo + lotes rotativos em sequência
                   |
                   v
         Normalização e deduplicação
                   |
                   v
-     Filtros: cargo, senioridade, localização
+ Filtros: cargo, senioridade, localização, contratação
                   |
                   v
            Prioridade geográfica
@@ -306,19 +335,24 @@ Fontes configuradas (Greenhouse, Lever, Ashby)
 
 ## Fontes configuradas
 
-As empresas/boards utilizados são definidos em `src/config/job-sources.ts`. A configuração inicial testada no desenvolvimento contém:
+As empresas/boards utilizados são definidos em `src/config/job-sources.ts`, e as pesquisas do LinkedIn e do Indeed em arquivos próprios. A configuração inicial testada no desenvolvimento contém:
 
-| Plataforma | Board de exemplo |
+| Plataforma | Referência de exemplo |
 |---|---|
 | Greenhouse | `stripe` |
 | Lever | `Flex` |
 | Ashby | `Ashby` |
+| LinkedIn Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) |
+| Indeed Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) |
 
-Essas fontes foram usadas para validar os providers e **não garantem oportunidades compatíveis com candidatos residentes no Brasil**. Adicionar uma nova empresa à lista exige confirmar previamente o identificador aceito pela respectiva API.
+Essas fontes foram usadas para validar os providers e **não garantem oportunidades compatíveis com candidatos residentes no Brasil**. Adicionar uma nova empresa à lista exige confirmar previamente o identificador aceito pela respectiva API. A cobertura completa das pesquisas do LinkedIn e do Indeed ocorre ao longo do ciclo de 20 lotes; cada execução roda apenas 5 pesquisas de cada plataforma.
 
-## Testes
+## Testes e validações realizadas
 
 ```bash
+# Build (TypeScript em modo estrito/ESM)
+npm run build
+
 # Filtros, persistência JSON, deduplicação, concorrência e falhas de despacho
 npm test
 
@@ -330,6 +364,15 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 
 Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL` e `JOBFINDER_RUN_DB_TESTS=true` e só rodam quando você autoriza explicitamente. Eles usam o prefixo `db-test:` e removem suas linhas ao final; sem as variáveis, apenas informam e não tocam no Supabase.
 
+**Resultados das validações realizadas:**
+
+- **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
+- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, persistência JSON com reserva e propriedade, e os desfechos do despacho de notificações.
+- **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
+- **Validação do provider:** `scripts/validate-linkedin.mjs` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção manual da coleta.
+
+> **Importante:** essas validações são **isoladas** e verificam a **lógica interna** do projeto. Elas **não** garantem o funcionamento integral em produção: a coleta real depende de `ts-jobspy` e de serviços de terceiros (sujeitos a mudanças de layout, bloqueios, limites e termos de uso), e as integrações com Gemini, Telegram e Supabase dependem de credenciais, cotas e conectividade. A cobertura completa das 200 pesquisas ocorre ao longo de 20 execuções e não é exercitada de uma só vez.
+
 ## Estrutura principal
 
 ```text
@@ -338,13 +381,19 @@ jobfinder/
 │   ├── jobfinder.yml                  # Automação agendada (GitHub Actions)
 │   └── telegram-smoke.yml             # Teste manual de envio ao Telegram
 ├── certs/prod-ca-2021.crt             # Certificado CA público do Supabase
+├── patches/ts-jobspy+3.0.1.patch      # Patch local: suporte a geoId no ts-jobspy
 ├── src/
-│   ├── config/job-sources.ts          # Quadros de vagas consultados
+│   ├── config/
+│   │   ├── job-sources.ts             # União de fontes e quadros de vagas
+│   │   ├── linkedin-searches.ts       # 100 pesquisas do LinkedIn Jobs
+│   │   └── indeed-searches.ts         # 100 pesquisas do Indeed Jobs
 │   ├── db/postgres.ts                 # Pool PostgreSQL com TLS validado
 │   ├── providers/
 │   │   ├── greenhouse.ts
 │   │   ├── lever.ts
-│   │   └── ashby.ts
+│   │   ├── ashby.ts
+│   │   ├── linkedin.ts                # LinkedIn Jobs via ts-jobspy
+│   │   └── indeed.ts                  # Indeed Jobs via ts-jobspy
 │   ├── services/
 │   │   ├── ai-analyzer.ts
 │   │   ├── analysis-history.ts        # Histórico de análises (JSON ou PostgreSQL)
@@ -354,13 +403,15 @@ jobfinder/
 │   │   ├── seniority-filter.ts
 │   │   ├── location-filter.ts
 │   │   ├── job-priority.ts
+│   │   ├── linkedin-search-rotation.ts # Rotação dos 20 lotes do LinkedIn
+│   │   ├── indeed-search-rotation.ts   # Rotação dos 20 lotes do Indeed
 │   │   ├── notification-policy.ts
 │   │   ├── notification-dispatch.ts   # Reserva + envio + confirmação/liberação
 │   │   └── telegram.ts
 │   ├── types/job.ts
 │   └── index.ts
 ├── supabase/migrations/               # Migrations SQL
-├── scripts/                           # Testes e utilitários manuais (inclui telegram-smoke.mjs)
+├── scripts/                           # Testes e utilitários manuais
 ├── data/                              # Históricos JSON locais (não versionar)
 ├── .env.example                       # Referência de configuração, sem segredos
 ├── package.json
@@ -376,23 +427,31 @@ jobfinder/
 3. Iniciar com `JOBFINDER_SEND_NOTIFICATIONS=false`; ativar envios conscientemente.
 4. Manter `JOBFINDER_AUTOMATION_ENABLED=false` até validar o fluxo; a execução manual (`workflow_dispatch`) permite testar sem habilitar o agendamento.
 5. Manter a validação TLS; nunca usar `rejectUnauthorized: false`.
-6. Respeitar as cotas e condições das APIs de terceiros. A coleta e a análise exigem conexão à internet e podem estar sujeitas a limites ou cobranças.
+6. Respeitar as cotas e condições das APIs de terceiros. A coleta e a análise exigem conexão à internet e podem estar sujeitas a limites ou cobranças. A coleta via `ts-jobspy` baseia-se em scraping e pode estar sujeita aos termos de uso das plataformas consultadas.
 7. Validar a vaga original antes de realizar qualquer candidatura; o JobFinder não garante disponibilidade, modalidade de contratação ou elegibilidade.
 
-## Limitações conhecidas da v1.1
+## Limitações conhecidas da v2.0
 
 - **Não há garantia de entrega exatamente uma vez:** o Telegram e o banco não compartilham transação. A reserva antes do envio reduz duplicidades em condições normais, mas não elimina a possibilidade de envio perdido ou de reserva `pending` após uma falha entre o envio e a confirmação. Essas reservas **não** são reenviadas automaticamente e exigem resolução manual (ver *Recuperação de reservas pendentes*).
 - **Persistência JSON não é compartilhada:** no modo `json`, os históricos ficam apenas na máquina local; o GitHub Actions usa `postgres`.
 - **Atraso do agendamento:** execuções do GitHub Actions podem ocorrer com atraso e não em tempo real.
-- **Fontes limitadas:** somente Greenhouse, Lever e Ashby; sem scraping do LinkedIn, Gupy, BNE, Indeed ou Catho nesta versão.
+- **Cobertura por execução:** apenas 5 pesquisas do LinkedIn e 5 do Indeed rodam por execução; a cobertura completa das 200 pesquisas depende do ciclo de 20 horas. As pesquisas **não** são executadas simultaneamente.
+- **Dependência de scraping:** a coleta das vagas do LinkedIn e do Indeed depende da `ts-jobspy@3.0.1` e do patch local (`geoId`); mudanças nas plataformas ou atualizações da biblioteca podem exigir ajustes. A versão fica fixada exatamente para preservar a compatibilidade do patch.
 - **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas; `remote: true` não significa disponibilidade no Brasil.
 - **Uma mensagem por execução:** oportunidades aprovadas adicionais ficam pendentes para execuções seguintes.
-- **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever ou Ashby) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
+- **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever, Ashby, LinkedIn Jobs ou Indeed Jobs) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
 
-## Próximas versões (fora do escopo da v1.1)
+## Roadmap
 
-- Novos providers brasileiros (Apify/LinkedIn Jobs, LinkedIn Posts, Gupy, Indeed, InfoJobs, BNE), após validação de acesso e permissões.
-- Observabilidade e testes de fluxo mais abrangentes.
+### Versão 2.1 — Planejada
+
+- **Integração de LinkedIn Posts.**
+- **Descoberta de oportunidades divulgadas por recrutadores.**
+- **Estudos de viabilidade, custos e limites de APIs de publicações.**
+
+> **LinkedIn Posts não faz parte da v2.0.** A v2.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada na v2.1, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
+
+Observabilidade e testes de fluxo mais abrangentes também ficam previstos para as próximas versões.
 
 O JobFinder permanece **exclusivamente backend** — sem interface de frontend — e continua usando o **Telegram** para as notificações.
 
@@ -401,6 +460,8 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 - [Greenhouse Job Board API](https://developers.greenhouse.io/job-board.html)
 - [Lever Postings API](https://github.com/lever/postings-api)
 - [Ashby Public Job Posting API](https://developers.ashbyhq.com/docs/public-job-posting-api)
+- [ts-jobspy](https://github.com/speedyapply/ts-jobspy)
+- [patch-package](https://github.com/ds300/patch-package)
 - [Gemini API](https://ai.google.dev/gemini-api/docs)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
 - [Supabase — conexão com o banco](https://supabase.com/docs/guides/database/connecting-to-postgres)
@@ -409,4 +470,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v1.1 implementada e validada em build e testes automatizados. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.0 implementada e validada em build e testes automatizados (LinkedIn Jobs + Indeed Jobs). A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
