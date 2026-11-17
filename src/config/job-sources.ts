@@ -1,3 +1,5 @@
+import type { IndeedJobSource } from "./indeed-searches.js";
+
 /** Plataformas de vagas baseadas em quadro (board) público de uma empresa. */
 export type BoardProvider = "greenhouse" | "lever" | "ashby";
 
@@ -18,7 +20,7 @@ export interface LinkedInJobSource {
 }
 
 /** Fonte de vagas suportada pelo pipeline. */
-export type JobSource = BoardJobSource | LinkedInJobSource;
+export type JobSource = BoardJobSource | LinkedInJobSource | IndeedJobSource;
 
 /**
  * Fontes validadas para o MVP 1.0 (quadros públicos de empresa).

@@ -1,12 +1,9 @@
-import {
-  BOARD_JOB_SOURCES,
-  type JobSource,
-  type LinkedInJobSource,
-} from "./config/job-sources.js";
+import { BOARD_JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
+import { fetchIndeedJobs } from "./providers/indeed.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
 import {
   getAnalyzedJob,
@@ -27,6 +24,11 @@ import {
   selectLinkedInBatch,
   type LinkedInBatch,
 } from "./services/linkedin-search-rotation.js";
+import {
+  INDEED_TOTAL_BATCHES,
+  selectIndeedBatch,
+  type IndeedBatch,
+} from "./services/indeed-search-rotation.js";
 import { getStorageBackend } from "./services/storage.js";
 import type { Job } from "./types/job.js";
 
@@ -77,9 +79,9 @@ interface RunSummary {
  * Descreve uma fonte para os logs, cobrindo as fontes sem `identifier`.
  */
 function describeSource(source: JobSource): string {
-  if (source.provider === "linkedin") {
+  if (source.provider === "linkedin" || source.provider === "indeed") {
     const location = source.location ? ` @ ${source.location}` : "";
-    return `linkedin (${source.searchTerm}${location})`;
+    return `${source.provider} (${source.searchTerm}${location})`;
   }
 
   return `${source.provider} (${source.identifier})`;
@@ -98,6 +100,22 @@ function logLinkedInBatch(batch: LinkedInBatch): void {
 
   console.log(
     `Lote LinkedIn ${batch.batchNumber}/${LINKEDIN_TOTAL_BATCHES}: ${terms}`,
+  );
+}
+
+/**
+ * Registra o lote do Indeed selecionado (número, termos e local de cada pesquisa).
+ */
+function logIndeedBatch(batch: IndeedBatch): void {
+  const terms = batch.searches
+    .map(
+      (search) =>
+        `"${search.searchTerm}" @ ${search.location ?? "sem localização"}`,
+    )
+    .join("; ");
+
+  console.log(
+    `Lote Indeed ${batch.batchNumber}/${INDEED_TOTAL_BATCHES}: ${terms}`,
   );
 }
 
@@ -123,6 +141,9 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
       case "linkedin":
         jobs = await fetchLinkedInJobs(source);
         break;
+      case "indeed":
+        jobs = await fetchIndeedJobs(source);
+        break;
     }
 
     console.log(`${label}: ${jobs.length} vagas coletadas`);
@@ -136,14 +157,14 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
 }
 
 /**
- * Coleta as pesquisas do lote do LinkedIn uma por vez.
+ * Coleta as pesquisas de um lote uma por vez.
  *
- * A execução é sequencial de propósito: as cinco buscas concorreriam na mesma
- * sessão da biblioteca e a rotação só precisa de uma por vez. A falha de uma
+ * A execução é sequencial de propósito: as buscas concorreriam na mesma sessão
+ * da biblioteca ts-jobspy e a rotação só precisa de uma por vez. A falha de uma
  * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais.
  */
-async function fetchLinkedInBatch(
-  searches: readonly LinkedInJobSource[],
+async function fetchSearchBatch(
+  searches: readonly JobSource[],
 ): Promise<Job[]> {
   const collected: Job[] = [];
 
@@ -152,6 +173,24 @@ async function fetchLinkedInBatch(
   }
 
   return collected;
+}
+
+/**
+ * Coleta os lotes rotativos do LinkedIn e do Indeed em sequência.
+ *
+ * Os dois lotes usam a mesma biblioteca ts-jobspy, então são executados um após
+ * o outro (e cada lote, uma pesquisa por vez) para que nunca haja duas
+ * pesquisas disputando a biblioteca ao mesmo tempo. As rotações são
+ * independentes: cinco pesquisas do LinkedIn e cinco do Indeed por execução.
+ */
+async function fetchRotatedBatches(
+  linkedinSearches: readonly JobSource[],
+  indeedSearches: readonly JobSource[],
+): Promise<Job[]> {
+  const linkedinJobs = await fetchSearchBatch(linkedinSearches);
+  const indeedJobs = await fetchSearchBatch(indeedSearches);
+
+  return [...linkedinJobs, ...indeedJobs];
 }
 
 /**
@@ -250,18 +289,22 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
  */
 async function main() {
   try {
-    const batch = selectLinkedInBatch();
-    logLinkedInBatch(batch);
+    const linkedinBatch = selectLinkedInBatch();
+    logLinkedInBatch(linkedinBatch);
 
-    // Quadros públicos em paralelo (comportamento original) e o lote do LinkedIn
-    // em sequência (uma pesquisa por vez), conforme a rotação.
-    const [boardCollected, linkedinCollected] = await Promise.all([
+    const indeedBatch = selectIndeedBatch();
+    logIndeedBatch(indeedBatch);
+
+    // Quadros públicos em paralelo (comportamento original); os lotes rotativos
+    // do LinkedIn e do Indeed rodam em sequência (uma pesquisa por vez cada) para
+    // não concorrerem pela mesma biblioteca ts-jobspy.
+    const [boardCollected, rotatedCollected] = await Promise.all([
       Promise.all(BOARD_JOB_SOURCES.map(fetchJobsFromSource)),
-      fetchLinkedInBatch(batch.searches),
+      fetchRotatedBatches(linkedinBatch.searches, indeedBatch.searches),
     ]);
 
     // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
-    const jobs = [...boardCollected.flat(), ...linkedinCollected];
+    const jobs = [...boardCollected.flat(), ...rotatedCollected];
     const uniqueJobs = deduplicateJobs(jobs);
     const developerJobs = filterDeveloperJobs(uniqueJobs);
     const seniorityJobs = filterBySeniority(developerJobs);
