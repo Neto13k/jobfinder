@@ -1,7 +1,7 @@
 import type { LinkedInJobSource } from "./job-sources.js";
 
 /** Limite de vagas por pesquisa, igual em todas as 100 configurações. */
-export const LINKEDIN_RESULTS_WANTED = 15;
+export const LINKEDIN_RESULTS_WANTED = 10;
 
 /** Localização e `geoId` das pesquisas de Maceió/AL (presencial, híbrido e remoto). */
 const LOCAL_LOCATION = "Maceio, Alagoas, Brazil";

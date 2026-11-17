@@ -9,8 +9,8 @@ const SOURCE = "linkedin";
 /** Plataforma consultada na biblioteca ts-jobspy. */
 const SITE: SiteName = "linkedin";
 
-/** Limite padrão de tempo por pesquisa, em milissegundos (30 segundos). */
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** Limite padrão de tempo por pesquisa, em milissegundos (45 segundos). */
+const DEFAULT_TIMEOUT_MS = 45_000;
 
 /** Parâmetros de busca aceitos pelo provider do LinkedIn. */
 export interface LinkedInSearchParams {
@@ -24,7 +24,7 @@ export interface LinkedInSearchParams {
   isRemote?: boolean;
   /** Limite de vagas por busca (padrão da biblioteca: 15). */
   resultsWanted?: number;
-  /** Limite de tempo da pesquisa em milissegundos (padrão: 30 s). */
+  /** Limite de tempo da pesquisa em milissegundos (padrão: 45 s). */
   timeoutMs?: number;
 }
 
