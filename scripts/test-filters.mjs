@@ -87,6 +87,264 @@ test("filtro de localização bloqueia restrição estrangeira explícita", () =
   assert.equal(kept.length, 2);
 });
 
+test("triagem geográfica: remoto elegível no Brasil é permitido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Brazil",
+        remote: true,
+        description: "Vaga 100% remota, aberta a residentes no Brasil.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: remoto restrito aos EUA é bloqueado", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Remote Junior Developer",
+        location: "United States",
+        remote: true,
+        description: "Aberto apenas a residentes dos Estados Unidos.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: presencial em São Paulo é bloqueado", () => {
+  const presencial = job({
+    title: "Desenvolvedor Júnior - Presencial",
+    location: "São Paulo, SP, Brazil",
+    remote: false,
+    description: "Vaga presencial no escritório em São Paulo.",
+  });
+
+  assert.equal(classifyJobLocation(presencial), "blocked");
+
+  const kept = filterByLocation([
+    presencial,
+    job({ location: "", remote: false }),
+  ]);
+  assert.equal(kept.length, 1, "A vaga presencial em SP deveria ser removida.");
+});
+
+test("triagem geográfica: híbrido em Maceió é permitido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Híbrido)",
+        location: "Maceió, Alagoas, Brazil",
+        remote: false,
+        description: "Modelo híbrido, 2 dias no escritório em Maceió.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: modalidade não informada permanece indefinida", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: false,
+        description: "Buscamos pessoa desenvolvedora para integrar o time.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: negação de trabalho remoto não confirma modalidade", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: false,
+        description: "Importante: esta não é uma vaga remota.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: sinais contraditórios de modalidade ficam indefinidos", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior Remoto",
+        location: "São Paulo, SP, Brazil",
+        remote: true,
+        description: "Na prática é uma vaga híbrida, com dias presenciais.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: preserva a classificação dos providers existentes", () => {
+  // Greenhouse/Ashby usam "remote" na localização; Lever usa workplaceType.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Frontend Developer",
+        location: "Remote - Brazil",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+
+  // Localidade estrangeira explícita continua bloqueada.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Software Engineer",
+        location: "London, United Kingdom",
+        remote: false,
+        description: "",
+      }),
+    ),
+    "blocked",
+  );
+
+  // Localização ausente permanece para análise posterior com IA.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Backend Developer",
+        location: "",
+        remote: false,
+        description: "",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: campo estruturado remote é respeitado (providers de API)", () => {
+  // Greenhouse/Lever/Ashby expõem a modalidade em campo próprio; o texto do
+  // anúncio pode não conter a palavra "remoto".
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Buscamos pessoa desenvolvedora para integrar o time.",
+      }),
+    ),
+    "allowed",
+  );
+
+  // `remote: false` NÃO confirma presencial: permanece indefinido.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: false,
+        description: "Buscamos pessoa desenvolvedora para integrar o time.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: contradição entre campo remoto e texto presencial fica indefinida", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Esta é uma vaga presencial no escritório.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: restrição de residência estrangeira na descrição é bloqueada", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Vaga remota, mas é necessário residir nos Estados Unidos.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: exigência de residência fora da área elegível não é permitida", () => {
+  // Vaga remota elegível ao Brasil em tese, mas a descrição exige residência
+  // em outra cidade/estado: não pode ser considerada `allowed`.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Vaga remota. É necessário residir em São Paulo.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: exigência de residência sem local identificável é incerta", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: false,
+        description: "Requisito: residir na região.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: restrição de residência compatível não bloqueia", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Vaga 100% remota. É necessário residir no Brasil.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: nome de país estrangeiro em texto descritivo não bloqueia", () => {
+  // Mera menção a outros países na descrição NÃO deve bloquear a vaga.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Brazil",
+        remote: true,
+        description: "Atendemos clientes nos Estados Unidos e no Canadá.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
 test("política de notificação classifica compatível, revisão e nulo", () => {
   assert.equal(
     classifyNotification({

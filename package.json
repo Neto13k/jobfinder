@@ -1,6 +1,6 @@
 {
   "name": "jobfinder",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Bot de busca de vagas de tecnologia que utiliza APIs e inteligência artificial para identificar oportunidades compatíveis com o perfil profissional e enviar notificações pelo Telegram.",
   "main": "dist/index.js",
   "scripts": {
@@ -10,8 +10,9 @@
     "test": "npm run build && node scripts/test-filters.mjs && node scripts/test-storage.mjs && node scripts/test-dispatch.mjs",
     "test:db": "npm run build && node --env-file=.env scripts/test-postgres-storage.mjs",
     "db:migrate": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
-    "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs --dry-run",
-    "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs"
+    "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
+    "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs",
+    "postinstall": "patch-package"
   },
   "repository": {
     "type": "git",
@@ -28,11 +29,13 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
+    "patch-package": "^8.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "dependencies": {
     "@google/genai": "^3.2.0",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "ts-jobspy": "3.0.1"
   }
 }
