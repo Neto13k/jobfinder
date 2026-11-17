@@ -1,5 +1,6 @@
 import { scrapeJobs, type Job as ScrapedJob, type ScrapeOptions, type SiteName } from "ts-jobspy";
 
+import { classifyJobModality } from "../services/location-filter.js";
 import type { Job } from "../types/job.js";
 
 /** Origem das vagas. */
@@ -17,6 +18,8 @@ export interface LinkedInSearchParams {
   searchTerm: string;
   /** Localização textual (ex.: "Maceió, AL" ou "Brasil"). */
   location?: string;
+  /** ID geográfico do LinkedIn (parâmetro `geoId`), fixa a busca em uma localidade exata. */
+  geoId?: string;
   /** Quando `true`, restringe a resultados marcados como remotos. */
   isRemote?: boolean;
   /** Limite de vagas por busca (padrão da biblioteca: 15). */
@@ -53,14 +56,23 @@ export async function fetchLinkedInJobs(
     throw new Error("LinkedIn search term is required.");
   }
 
-  // Opções montadas apenas com os filtros informados: a biblioteca rejeita
+  // Opções da biblioteca montadas apenas com os filtros informados: ela rejeita
   // valores inválidos e chaves desconhecidas, então nada é passado por engano.
+  const linkedinOptions: NonNullable<ScrapeOptions["linkedin"]> = {
+    // Busca a descrição completa de cada anúncio (requisição extra por vaga),
+    // necessária para a análise posterior da IA.
+    fetchDescription: true,
+  };
+
+  if (params.geoId !== undefined) {
+    // `geoId` fixa a busca em uma localidade exata (suporte via patch do ts-jobspy).
+    linkedinOptions.geoId = params.geoId;
+  }
+
   const options: ScrapeOptions = {
     sites: SITE,
     searchTerm,
-    // Busca a descrição completa de cada anúncio (requisição extra por vaga),
-    // necessária para a análise posterior da IA.
-    linkedin: { fetchDescription: true },
+    linkedin: linkedinOptions,
     // Interrompe a pesquisa lenta para não travar a coleta das demais fontes;
     // a biblioteca reporta o corte como `partial` ou `error` em `meta.sites`.
     timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -146,17 +158,27 @@ function toJob(scraped: ScrapedJob): Job | undefined {
     return undefined;
   }
 
+  const location = scraped.location ?? "";
+  const description = scraped.description ?? "";
+
   return {
     id,
     title: scraped.title,
     company: scraped.company ?? "",
-    location: scraped.location ?? "",
-    // `Job.remote` é booleano e não representa "desconhecido". Só marcamos como
-    // remoto quando a plataforma afirma isso; `isRemote === null` (desconhecido)
-    // cai em `false`, que aqui significa "não confirmado como remoto", e NÃO
-    // "presencial". Ampliar `Job.remote` para um estado tri-state fica pendente.
-    remote: scraped.isRemote === true,
-    description: scraped.description ?? "",
+    location,
+    // `Job.remote` é booleano e não representa "desconhecido". A modalidade é
+    // inferida dos sinais do próprio anúncio (título/localização/descrição), e
+    // não do filtro `isRemote` usado na pesquisa — remoto nessa busca não prova
+    // que cada vaga retornada seja remota. `false` significa "não confirmado
+    // como remoto", nunca "presencial"; ampliar `Job.remote` para um estado
+    // tri-state fica pendente.
+    remote:
+      classifyJobModality({
+        title: scraped.title,
+        location,
+        description,
+      }) === "remote",
+    description,
     url: rawUrl,
     source: SOURCE,
     publishedAt: scraped.datePosted ?? undefined,

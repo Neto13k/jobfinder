@@ -12,6 +12,7 @@ export interface LinkedInJobSource {
   provider: "linkedin";
   searchTerm: string;
   location?: string;
+  geoId?: string;
   isRemote?: boolean;
   resultsWanted?: number;
 }
@@ -24,20 +25,43 @@ export const JOB_SOURCES: readonly JobSource[] = [
   { provider: "greenhouse", identifier: "stripe" },
   { provider: "lever", identifier: "Flex" },
   { provider: "ashby", identifier: "Ashby" },
-  // LinkedIn: desenvolvimento (júnior e estágio) presencial/híbrido em Maceió/AL.
-  // Sem `isRemote`: o ts-jobspy só filtra quando `isRemote` é true, então a
-  // localização restringe a busca — a triagem fica com os filtros existentes.
+  // LinkedIn: buscas locais em Maceió/AL, fixadas pelo `geoId` da cidade para
+  // evitar variação do texto de localização. Sem `isRemote`: o ts-jobspy só
+  // filtra quando `isRemote` é true, então a localização restringe a busca — a
+  // triagem fica com os filtros existentes.
   {
     provider: "linkedin",
     searchTerm: "desenvolvedor",
-    location: "Maceió, Alagoas, Brasil",
+    location: "Maceió, Alagoas, Brazil",
+    geoId: "102957102",
     resultsWanted: 10,
   },
-  // LinkedIn: desenvolvimento júnior remoto disponível para o Brasil.
+  {
+    provider: "linkedin",
+    searchTerm: "estágio desenvolvimento",
+    location: "Maceió, Alagoas, Brazil",
+    geoId: "102957102",
+    resultsWanted: 10,
+  },
+  // LinkedIn: buscas remotas disponíveis para o Brasil.
   {
     provider: "linkedin",
     searchTerm: "desenvolvedor júnior",
-    location: "Brasil",
+    location: "Brazil",
+    isRemote: true,
+    resultsWanted: 10,
+  },
+  {
+    provider: "linkedin",
+    searchTerm: "desenvolvedor full stack júnior",
+    location: "Brazil",
+    isRemote: true,
+    resultsWanted: 10,
+  },
+  {
+    provider: "linkedin",
+    searchTerm: "estágio desenvolvimento",
+    location: "Brazil",
     isRemote: true,
     resultsWanted: 10,
   },

@@ -10,8 +10,9 @@
     "test": "npm run build && node scripts/test-filters.mjs && node scripts/test-storage.mjs && node scripts/test-dispatch.mjs",
     "test:db": "npm run build && node --env-file=.env scripts/test-postgres-storage.mjs",
     "db:migrate": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
-    "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs --dry-run",
-    "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs"
+    "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
+    "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs",
+    "postinstall": "patch-package"
   },
   "repository": {
     "type": "git",
@@ -28,12 +29,13 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
+    "patch-package": "^8.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "dependencies": {
     "@google/genai": "^3.2.0",
     "pg": "^8.23.1",
-    "ts-jobspy": "^3.0.1"
+    "ts-jobspy": "3.0.1"
   }
 }
