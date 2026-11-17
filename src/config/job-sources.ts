@@ -20,49 +20,14 @@ export interface LinkedInJobSource {
 /** Fonte de vagas suportada pelo pipeline. */
 export type JobSource = BoardJobSource | LinkedInJobSource;
 
-/** Fontes validadas para o MVP 1.0, mais as buscas do LinkedIn (v2.0). */
-export const JOB_SOURCES: readonly JobSource[] = [
+/**
+ * Fontes validadas para o MVP 1.0 (quadros públicos de empresa).
+ *
+ * As buscas do LinkedIn (v2.0) não são estáticas: ficam em `linkedin-searches.ts`
+ * e são selecionadas por lote em `services/linkedin-search-rotation.ts`.
+ */
+export const BOARD_JOB_SOURCES: readonly BoardJobSource[] = [
   { provider: "greenhouse", identifier: "stripe" },
   { provider: "lever", identifier: "Flex" },
   { provider: "ashby", identifier: "Ashby" },
-  // LinkedIn: buscas locais em Maceió/AL, fixadas pelo `geoId` da cidade para
-  // evitar variação do texto de localização. Sem `isRemote`: o ts-jobspy só
-  // filtra quando `isRemote` é true, então a localização restringe a busca — a
-  // triagem fica com os filtros existentes.
-  {
-    provider: "linkedin",
-    searchTerm: "desenvolvedor",
-    location: "Maceió, Alagoas, Brazil",
-    geoId: "102957102",
-    resultsWanted: 10,
-  },
-  {
-    provider: "linkedin",
-    searchTerm: "estágio desenvolvimento",
-    location: "Maceió, Alagoas, Brazil",
-    geoId: "102957102",
-    resultsWanted: 10,
-  },
-  // LinkedIn: buscas remotas disponíveis para o Brasil.
-  {
-    provider: "linkedin",
-    searchTerm: "desenvolvedor júnior",
-    location: "Brazil",
-    isRemote: true,
-    resultsWanted: 10,
-  },
-  {
-    provider: "linkedin",
-    searchTerm: "desenvolvedor full stack júnior",
-    location: "Brazil",
-    isRemote: true,
-    resultsWanted: 10,
-  },
-  {
-    provider: "linkedin",
-    searchTerm: "estágio desenvolvimento",
-    location: "Brazil",
-    isRemote: true,
-    resultsWanted: 10,
-  },
 ];

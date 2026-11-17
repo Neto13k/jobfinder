@@ -1,4 +1,8 @@
-import { JOB_SOURCES, type JobSource } from "./config/job-sources.js";
+import {
+  BOARD_JOB_SOURCES,
+  type JobSource,
+  type LinkedInJobSource,
+} from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
@@ -18,6 +22,11 @@ import {
 } from "./services/notification-dispatch.js";
 import { classifyNotification } from "./services/notification-policy.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
+import {
+  LINKEDIN_TOTAL_BATCHES,
+  selectLinkedInBatch,
+  type LinkedInBatch,
+} from "./services/linkedin-search-rotation.js";
 import { getStorageBackend } from "./services/storage.js";
 import type { Job } from "./types/job.js";
 
@@ -77,6 +86,22 @@ function describeSource(source: JobSource): string {
 }
 
 /**
+ * Registra o lote do LinkedIn selecionado (número, termos e local de cada pesquisa).
+ */
+function logLinkedInBatch(batch: LinkedInBatch): void {
+  const terms = batch.searches
+    .map(
+      (search) =>
+        `"${search.searchTerm}" @ ${search.location ?? "sem localização"}`,
+    )
+    .join("; ");
+
+  console.log(
+    `Lote LinkedIn ${batch.batchNumber}/${LINKEDIN_TOTAL_BATCHES}: ${terms}`,
+  );
+}
+
+/**
  * Coleta as vagas de uma fonte, isolando a falha para não derrubar as demais.
  */
 async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
@@ -108,6 +133,25 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
     console.error(`Falha ao coletar da fonte ${label}: ${message}`);
     return [];
   }
+}
+
+/**
+ * Coleta as pesquisas do lote do LinkedIn uma por vez.
+ *
+ * A execução é sequencial de propósito: as cinco buscas concorreriam na mesma
+ * sessão da biblioteca e a rotação só precisa de uma por vez. A falha de uma
+ * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais.
+ */
+async function fetchLinkedInBatch(
+  searches: readonly LinkedInJobSource[],
+): Promise<Job[]> {
+  const collected: Job[] = [];
+
+  for (const search of searches) {
+    collected.push(...(await fetchJobsFromSource(search)));
+  }
+
+  return collected;
 }
 
 /**
@@ -206,10 +250,18 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
  */
 async function main() {
   try {
-    const collected = await Promise.all(JOB_SOURCES.map(fetchJobsFromSource));
+    const batch = selectLinkedInBatch();
+    logLinkedInBatch(batch);
+
+    // Quadros públicos em paralelo (comportamento original) e o lote do LinkedIn
+    // em sequência (uma pesquisa por vez), conforme a rotação.
+    const [boardCollected, linkedinCollected] = await Promise.all([
+      Promise.all(BOARD_JOB_SOURCES.map(fetchJobsFromSource)),
+      fetchLinkedInBatch(batch.searches),
+    ]);
 
     // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
-    const jobs = collected.flat();
+    const jobs = [...boardCollected.flat(), ...linkedinCollected];
     const uniqueJobs = deduplicateJobs(jobs);
     const developerJobs = filterDeveloperJobs(uniqueJobs);
     const seniorityJobs = filterBySeniority(developerJobs);
