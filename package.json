@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@google/genai": "^3.2.0",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "ts-jobspy": "^3.0.1"
   }
 }

@@ -2,6 +2,7 @@ import { JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
+import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
 import {
   getAnalyzedJob,
@@ -64,9 +65,23 @@ interface RunSummary {
 }
 
 /**
+ * Descreve uma fonte para os logs, cobrindo as fontes sem `identifier`.
+ */
+function describeSource(source: JobSource): string {
+  if (source.provider === "linkedin") {
+    const location = source.location ? ` @ ${source.location}` : "";
+    return `linkedin (${source.searchTerm}${location})`;
+  }
+
+  return `${source.provider} (${source.identifier})`;
+}
+
+/**
  * Coleta as vagas de uma fonte, isolando a falha para não derrubar as demais.
  */
 async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
+  const label = describeSource(source);
+
   try {
     let jobs: Job[];
 
@@ -80,18 +95,17 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
       case "ashby":
         jobs = await fetchAshbyJobs(source.identifier);
         break;
+      case "linkedin":
+        jobs = await fetchLinkedInJobs(source);
+        break;
     }
 
-    console.log(
-      `${source.provider} (${source.identifier}): ${jobs.length} vagas coletadas`,
-    );
+    console.log(`${label}: ${jobs.length} vagas coletadas`);
 
     return jobs;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(
-      `Falha ao coletar da fonte ${source.provider} (${source.identifier}): ${message}`,
-    );
+    console.error(`Falha ao coletar da fonte ${label}: ${message}`);
     return [];
   }
 }
