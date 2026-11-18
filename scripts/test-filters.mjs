@@ -14,6 +14,7 @@ const { filterByLocation, classifyJobLocation } = await import(
 const { classifyNotification } = await import(
   "../dist/services/notification-policy.js"
 );
+const { prioritizeJobs } = await import("../dist/services/job-priority.js");
 
 /** Monta uma vaga mínima com os campos sobrepostos. */
 function job(overrides) {
@@ -718,4 +719,169 @@ test("política de notificação classifica compatível, revisão e nulo", () =>
     }),
     null,
   );
+});
+
+// --- Calibragem 4.0: priorização temporal ---------------------------------
+
+// Data de referência fixa para testes determinísticos.
+const REFERENCE = new Date("2026-11-18T12:00:00.000Z");
+
+/** ISO de N horas antes da data de referência. */
+function hoursBefore(hours) {
+  return new Date(REFERENCE.getTime() - hours * 60 * 60 * 1000).toISOString();
+}
+
+/** ISO de N dias antes da data de referência. */
+function daysBefore(days) {
+  return hoursBefore(days * 24);
+}
+
+/** Ids na ordem retornada. */
+function ids(jobs) {
+  return jobs.map((item) => item.id);
+}
+
+test("priorização temporal: vagas recentes passam à frente das antigas", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "antiga", publishedAt: daysBefore(30) }),
+      job({ id: "recente", publishedAt: hoursBefore(1) }),
+      job({ id: "media", publishedAt: daysBefore(2) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), ["recente", "media", "antiga"]);
+});
+
+test("priorização temporal: recência prevalece sobre elegibilidade geográfica", () => {
+  // Localização indefinida (MEDIUM) mas recém-publicada supera uma vaga
+  // elegível (HIGH) muito antiga.
+  const result = prioritizeJobs(
+    [
+      job({
+        id: "elegivel-antiga",
+        location: "Remoto - Brasil",
+        publishedAt: daysBefore(30),
+      }),
+      job({
+        id: "indefinida-recente",
+        location: "",
+        remote: true,
+        publishedAt: hoursBefore(1),
+      }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), ["indefinida-recente", "elegivel-antiga"]);
+});
+
+test("priorização temporal: prioridade geográfica é preservada na mesma faixa", () => {
+  // Todas na faixa ≤24h: a ordem geográfica decide primeiro e, dentro de cada
+  // prioridade, a vaga mais recente vem antes.
+  const result = prioritizeJobs(
+    [
+      job({ id: "latam-1h", location: "Remote - LATAM", publishedAt: hoursBefore(1) }),
+      job({ id: "elegivel-20h", location: "Remoto - Brasil", publishedAt: hoursBefore(20) }),
+      job({ id: "elegivel-2h", location: "Remoto - Brasil", publishedAt: hoursBefore(2) }),
+      job({ id: "restrita-3h", location: "US residents only", publishedAt: hoursBefore(3) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), [
+    "elegivel-2h",
+    "elegivel-20h",
+    "latam-1h",
+    "restrita-3h",
+  ]);
+});
+
+test("priorização temporal: limites das categorias temporais", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "d15", publishedAt: daysBefore(15) }),
+      job({ id: "h23", publishedAt: hoursBefore(23) }),
+      job({ id: "d8", publishedAt: daysBefore(8) }),
+      job({ id: "h25", publishedAt: hoursBefore(25) }),
+      job({ id: "d13", publishedAt: daysBefore(13) }),
+      job({ id: "h71", publishedAt: hoursBefore(71) }),
+      job({ id: "d6", publishedAt: daysBefore(6) }),
+      job({ id: "h73", publishedAt: hoursBefore(73) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), [
+    "h23", // ≤24h
+    "h25", // >24h ≤72h (mais recente primeiro)
+    "h71", // >24h ≤72h
+    "h73", // >72h ≤7d (mais recente primeiro)
+    "d6", // >72h ≤7d
+    "d8", // >7d ≤14d (mais recente primeiro)
+    "d13", // >7d ≤14d
+    "d15", // >14d
+  ]);
+});
+
+test("priorização temporal: datas ausentes, inválidas e futuras não são recentes", () => {
+  const future = new Date(REFERENCE.getTime() + 60 * 60 * 1000).toISOString();
+  const result = prioritizeJobs(
+    [
+      job({ id: "sem-data", publishedAt: undefined }),
+      job({ id: "invalida", publishedAt: "data-invalida" }),
+      job({ id: "futura", publishedAt: future }),
+      job({ id: "recente", publishedAt: hoursBefore(1) }),
+    ],
+    REFERENCE,
+  );
+  // Apenas a vaga recém-publicada é tratada como recente; as demais caem na
+  // categoria de recência desconhecida, preservadas na ordem original.
+  assert.deepEqual(ids(result), ["recente", "sem-data", "invalida", "futura"]);
+});
+
+test("priorização temporal: preserva vagas sem data e não exclui por idade", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "muito-antiga", publishedAt: daysBefore(365) }),
+      job({ id: "sem-data" }),
+    ],
+    REFERENCE,
+  );
+  assert.equal(result.length, 2);
+  assert.deepEqual(ids(result).sort(), ["muito-antiga", "sem-data"]);
+});
+
+test("priorização temporal: estabilidade em empates", () => {
+  const same = hoursBefore(2);
+  const result = prioritizeJobs(
+    [
+      job({ id: "a", publishedAt: same }),
+      job({ id: "b", publishedAt: same }),
+      job({ id: "c" }),
+      job({ id: "d" }),
+    ],
+    REFERENCE,
+  );
+  // Empate temporal e geográfico mantém a ordem de entrada, inclusive entre as
+  // vagas sem data.
+  assert.deepEqual(ids(result), ["a", "b", "c", "d"]);
+});
+
+test("priorização temporal: não muta o array nem os objetos originais", () => {
+  const original = [
+    job({ id: "x", publishedAt: daysBefore(30) }),
+    job({ id: "y", publishedAt: hoursBefore(1) }),
+  ];
+  const snapshot = JSON.parse(JSON.stringify(original));
+
+  const result = prioritizeJobs(original, REFERENCE);
+
+  assert.notEqual(result, original); // devolve uma nova coleção
+  assert.deepEqual(original, snapshot); // array de entrada intacto
+  assert.equal(result.length, 2);
+  // Mesmas referências, apenas reordenadas: nenhuma vaga foi clonada ou mutada.
+  assert.ok(result.every((item) => original.includes(item)));
+});
+
+test("priorização temporal: funciona sem data de referência (padrão agora)", () => {
+  const result = prioritizeJobs([job({ id: "a" }), job({ id: "b" })]);
+  assert.equal(result.length, 2);
 });
