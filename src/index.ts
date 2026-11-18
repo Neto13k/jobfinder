@@ -22,6 +22,10 @@ import {
   type NotificationCandidate,
 } from "./services/notification-dispatch.js";
 import { classifyNotification } from "./services/notification-policy.js";
+import {
+  collectSearchBatch,
+  RateLimitError,
+} from "./services/rate-limit.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
 import {
   LINKEDIN_TOTAL_BATCHES,
@@ -211,6 +215,12 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
 
     return jobs;
   } catch (error) {
+    // Rate limiting é propagado ao orquestrador para interromper apenas as
+    // pesquisas restantes deste provider; os demais erros seguem isolados aqui.
+    if (error instanceof RateLimitError) {
+      throw error;
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Falha ao coletar da fonte ${label}: ${message}`);
     return [];
@@ -222,18 +232,14 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
  *
  * A execução é sequencial de propósito: as buscas concorreriam na mesma sessão
  * da biblioteca ts-jobspy e a rotação só precisa de uma por vez. A falha de uma
- * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais.
+ * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais,
+ * exceto no rate limiting (HTTP 429), que interrompe apenas as pesquisas
+ * restantes deste provider preservando as vagas já coletadas.
  */
 async function fetchSearchBatch(
   searches: readonly JobSource[],
 ): Promise<Job[]> {
-  const collected: Job[] = [];
-
-  for (const search of searches) {
-    collected.push(...(await fetchJobsFromSource(search)));
-  }
-
-  return collected;
+  return collectSearchBatch(searches, fetchJobsFromSource, describeSource);
 }
 
 /**
