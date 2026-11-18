@@ -12,7 +12,11 @@ import {
 import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
-import { filterByLocation } from "./services/location-filter.js";
+import {
+  classifyJobLocation,
+  filterByLocation,
+  type JobLocation,
+} from "./services/location-filter.js";
 import {
   notifyWithReservation,
   type NotificationCandidate,
@@ -65,15 +69,45 @@ function parseMaxAnalyses(raw: string | undefined): number {
 
 const MAX_ANALYSES = parseMaxAnalyses(process.env.JOBFINDER_MAX_ANALYSES);
 
+/** Máximo de exemplos de vagas exibidos por categoria nos logs de filtros. */
+const MAX_LOG_EXAMPLES = 5;
+
 /** Totais exibidos no resumo final da execução. */
 interface RunSummary {
   analyzed: number;
+  recovered: number;
   compatible: number;
   incompatible: number;
   review: number;
   sentCompatible: number;
   sentReview: number;
+  // Vagas barradas pelo limite de análises, separadas por histórico consultado.
+  unanalyzedByLimit: number;
+  unscannedByLimit: number;
 }
+
+/** Motivo pelo qual uma vaga analisada não gerou notificação. */
+type SkipReason =
+  | "incompatible"
+  | "review_not_eligible"
+  | "location"
+  | "contract"
+  | "notifications_disabled"
+  | "reviews_disabled"
+  | "already_notified"
+  | "run_limit";
+
+/** Rótulos, em português, de cada motivo de não notificação. */
+const SKIP_REASON_LABELS: Record<SkipReason, string> = {
+  incompatible: "incompatibilidade",
+  review_not_eligible: "revisão não elegível para notificação",
+  location: "localização indefinida ou bloqueada",
+  contract: "contratação indefinida ou bloqueada",
+  notifications_disabled: "notificações desativadas",
+  reviews_disabled: "alertas de revisão desativados",
+  already_notified: "vaga já notificada ou reservada",
+  run_limit: "limite de notificações por execução",
+};
 
 /**
  * Descreve uma fonte para os logs, cobrindo as fontes sem `identifier`.
@@ -85,6 +119,33 @@ function describeSource(source: JobSource): string {
   }
 
   return `${source.provider} (${source.identifier})`;
+}
+
+/**
+ * Descreve uma vaga para os logs.
+ *
+ * Expõe apenas metadados de seleção (título, empresa, fonte, localização e data
+ * de publicação); nunca credenciais nem a descrição completa da vaga.
+ */
+function describeJob(job: Job): string {
+  const location = job.location ? job.location : "localização não informada";
+  const published = job.publishedAt
+    ? ` | publicado em ${job.publishedAt}`
+    : "";
+
+  return `${job.title} (${job.company}) | fonte ${job.source} | ${location}${published}`;
+}
+
+/**
+ * Registra a quantidade de vagas de um grupo e até {@link MAX_LOG_EXAMPLES}
+ * exemplos, para evidenciar os gargalos de cada etapa sem poluir o log.
+ */
+function logJobGroup(header: string, jobs: Job[]): void {
+  console.log(`${header}: ${jobs.length}`);
+
+  for (const job of jobs.slice(0, MAX_LOG_EXAMPLES)) {
+    console.log(`  - ${describeJob(job)}`);
+  }
 }
 
 /**
@@ -203,38 +264,75 @@ async function fetchRotatedBatches(
 async function processJobs(jobs: Job[]): Promise<RunSummary> {
   const summary: RunSummary = {
     analyzed: 0,
+    recovered: 0,
     compatible: 0,
     incompatible: 0,
     review: 0,
     sentCompatible: 0,
     sentReview: 0,
+    unanalyzedByLimit: 0,
+    unscannedByLimit: 0,
+  };
+
+  // Contagem por motivo de não notificação, para o resumo do funil.
+  const skipCounts: Record<SkipReason, number> = {
+    incompatible: 0,
+    review_not_eligible: 0,
+    location: 0,
+    contract: 0,
+    notifications_disabled: 0,
+    reviews_disabled: 0,
+    already_notified: 0,
+    run_limit: 0,
+  };
+
+  /** Contabiliza e registra o motivo pelo qual a vaga não gera notificação. */
+  const registerSkip = (job: Job, reason: SkipReason): void => {
+    skipCounts[reason]++;
+    console.log(
+      `Sem notificação: ${job.title} (${job.company}) | ` +
+        `motivo: ${SKIP_REASON_LABELS[reason]}`,
+    );
   };
 
   // Candidatos pendentes, na ordem de prioridade em que aparecem.
   let compatibleCandidate: NotificationCandidate | undefined;
   let reviewCandidate: NotificationCandidate | undefined;
 
+  // Vagas cuja iteração já começou; usado para medir o que sobra no break.
+  let processed = 0;
+
   for (const job of jobs) {
     // Limite de análises atingido: só continua se ainda houver envio pendente.
     if (summary.analyzed >= MAX_ANALYSES) {
       if (!SEND_NOTIFICATIONS || compatibleCandidate) {
+        // As vagas restantes nem chegam a ter o histórico consultado.
+        summary.unscannedByLimit = jobs.length - processed;
         break;
       }
     }
 
+    processed++;
+
+    // Vaga já notificada/reservada: não é analisada nem notificada de novo.
     if (await isJobNotified(job)) {
+      skipCounts.already_notified++;
       continue;
     }
 
     // Reaproveita a análise salva; só chama a IA quando não houver resultado.
     let analysis: JobAnalysis | undefined = await getAnalyzedJob(job);
+    let origin: "nova" | "recuperada" = "recuperada";
 
     if (!analysis) {
       // Sem resultado salvo e limite atingido: não chama o Gemini.
       if (summary.analyzed >= MAX_ANALYSES) {
+        // Histórico consultado, mas a vaga fica efetivamente sem análise.
+        summary.unanalyzedByLimit++;
         continue;
       }
 
+      origin = "nova";
       console.log(`Analisando: ${job.title} (${job.company})`);
       analysis = await analyzeJob(job);
       // Salva a nova análise imediatamente, inclusive as compatíveis.
@@ -248,20 +346,55 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
       } else {
         summary.review++;
       }
+    } else {
+      summary.recovered++;
     }
 
+    const published = job.publishedAt
+      ? ` | publicado em ${job.publishedAt}`
+      : "";
+
     console.log(
-      `Resultado da IA: ${analysis.decision} | score ${analysis.score} | ` +
-        `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus}`,
+      `Resultado da IA: ${job.title} (${job.company}) | fonte ${job.source}${published} | ` +
+        `origem ${origin} | ${analysis.decision} | score ${analysis.score} | ` +
+        `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus} | ` +
+        `motivo: ${analysis.reason}`,
     );
 
     const kind = classifyNotification(analysis);
 
     // Compatível tem prioridade; revisão só conta quando habilitada.
-    if (kind === "compatible" && SEND_NOTIFICATIONS && !compatibleCandidate) {
-      compatibleCandidate = { job, analysis };
-    } else if (kind === "manual_review" && SEND_REVIEWS && !reviewCandidate) {
-      reviewCandidate = { job, analysis };
+    if (kind === "compatible") {
+      if (!SEND_NOTIFICATIONS) {
+        registerSkip(job, "notifications_disabled");
+      } else if (compatibleCandidate) {
+        // Já há uma compatível escolhida nesta execução: limite de envio.
+        registerSkip(job, "run_limit");
+      } else {
+        compatibleCandidate = { job, analysis };
+      }
+    } else if (kind === "manual_review") {
+      // Sem o envio geral, o motivo raiz é "notificações desativadas": o envio
+      // de revisão só é considerado quando o envio geral está ligado.
+      if (!SEND_NOTIFICATIONS) {
+        registerSkip(job, "notifications_disabled");
+      } else if (!SEND_REVIEWS) {
+        registerSkip(job, "reviews_disabled");
+      } else if (reviewCandidate) {
+        registerSkip(job, "run_limit");
+      } else {
+        reviewCandidate = { job, analysis };
+      }
+    } else if (analysis.decision === "review") {
+      // Revisão fora dos critérios do aviso (localização permitida + contratação
+      // indefinida): não é uma incompatibilidade real.
+      registerSkip(job, "review_not_eligible");
+    } else if (analysis.locationStatus !== "allowed") {
+      registerSkip(job, "location");
+    } else if (analysis.contractStatus !== "allowed") {
+      registerSkip(job, "contract");
+    } else {
+      registerSkip(job, "incompatible");
     }
   }
 
@@ -271,13 +404,31 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
     if (await notifyWithReservation(compatibleCandidate, "compatible")) {
       summary.sentCompatible++;
       console.log(`Notificação enviada: ${job.title} (${job.company})`);
+    } else {
+      registerSkip(job, "already_notified");
+    }
+
+    // A revisão não é enviada quando já há uma compatível nesta execução.
+    if (reviewCandidate) {
+      registerSkip(reviewCandidate.job, "run_limit");
     }
   } else if (reviewCandidate) {
     const { job } = reviewCandidate;
     if (await notifyWithReservation(reviewCandidate, "manual_review")) {
       summary.sentReview++;
       console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
+    } else {
+      registerSkip(job, "already_notified");
     }
+  }
+
+  // Resumo dos motivos de não notificação, na ordem declarada em SkipReason.
+  const skipEntries = (Object.keys(skipCounts) as SkipReason[])
+    .filter((reason) => skipCounts[reason] > 0)
+    .map((reason) => `${SKIP_REASON_LABELS[reason]}: ${skipCounts[reason]}`);
+
+  if (skipEntries.length > 0) {
+    console.log(`Motivos de não notificação: ${skipEntries.join(" | ")}`);
   }
 
   return summary;
@@ -312,6 +463,25 @@ async function main() {
     // Ordena por prioridade geográfica sem descartar vagas elegíveis.
     const prioritizedJobs = prioritizeJobs(eligibleJobs);
 
+    // Grupos descartados por etapa, derivados por identidade de objeto (os
+    // filtros preservam as referências), sem alterar as regras de elegibilidade.
+    const developerSet = new Set(developerJobs);
+    const senioritySet = new Set(seniorityJobs);
+    const discardedByDedupe = jobs.length - uniqueJobs.length;
+    const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
+    const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
+    // Classificação da localização apenas para observabilidade (função pura).
+    const locationByJob = new Map<Job, JobLocation>();
+    for (const job of seniorityJobs) {
+      locationByJob.set(job, classifyJobLocation(job));
+    }
+    const blockedByLocation = seniorityJobs.filter(
+      (job) => locationByJob.get(job) === "blocked",
+    );
+    const unknownLocationJobs = seniorityJobs.filter(
+      (job) => locationByJob.get(job) === "unknown",
+    );
+
     console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
     console.log(`Desenvolvimento: ${developerJobs.length}`);
     console.log(`Após senioridade: ${seniorityJobs.length}`);
@@ -319,14 +489,24 @@ async function main() {
     console.log(`Armazenamento: ${getStorageBackend()}`);
     console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
 
+    // Detalhamento dos descartes de cada filtro, com exemplos.
+    console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
+    logJobGroup("Descartadas por desenvolvimento", discardedByDeveloper);
+    logJobGroup("Descartadas por senioridade", discardedBySeniority);
+    logJobGroup("Bloqueadas por localização", blockedByLocation);
+    logJobGroup("Localização indefinida", unknownLocationJobs);
+
     const summary = await processJobs(prioritizedJobs);
 
     console.log(
       `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
+        `${summary.recovered} recuperada(s) do histórico | ` +
         `${summary.compatible} compatível(is) | ${summary.incompatible} incompatível(is) | ` +
         `${summary.review} em revisão | ` +
         `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
-        `${summary.sentReview} notificação(ões) de revisão`,
+        `${summary.sentReview} notificação(ões) de revisão | ` +
+        `${summary.unanalyzedByLimit} não analisada(s) por limite (histórico consultado) | ` +
+        `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
     );
   } catch (error) {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
