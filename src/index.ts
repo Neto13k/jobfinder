@@ -1,5 +1,6 @@
 import { BOARD_JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
+import { BoardTimeoutError } from "./providers/board-http.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
@@ -219,6 +220,14 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
     // pesquisas restantes deste provider; os demais erros seguem isolados aqui.
     if (error instanceof RateLimitError) {
       throw error;
+    }
+
+    // Timeout dos boards públicos é destacado do erro comum nos logs.
+    if (error instanceof BoardTimeoutError) {
+      console.error(
+        `Timeout de ${error.timeoutMs} ms ao coletar da fonte ${label}.`,
+      );
+      return [];
     }
 
     const message = error instanceof Error ? error.message : String(error);

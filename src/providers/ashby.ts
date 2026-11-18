@@ -1,4 +1,5 @@
 import type { Job } from "../types/job.js";
+import { fetchBoardWithTimeout } from "./board-http.js";
 
 /** Origem das vagas. */
 const SOURCE = "ashby";
@@ -28,9 +29,12 @@ interface AshbyJob {
 /**
  * Busca as vagas de um Job Board público da Ashby e as normaliza para {@link Job}.
  *
- * Vagas explicitamente não listadas (`isListed === false`) são descartadas.
+ * Vagas explicitamente não listadas (`isListed === false`) são descartadas. A
+ * requisição é limitada ao timeout dos boards públicos (ver
+ * {@link fetchBoardWithTimeout}).
  *
  * @param boardName Identificador do Job Board na Ashby (ex.: "Ashby").
+ * @throws {BoardTimeoutError} Se a requisição exceder o timeout.
  * @throws {Error} Se a resposta HTTP for de erro ou o corpo for inválido.
  */
 export async function fetchAshbyJobs(boardName: string): Promise<Job[]> {
@@ -38,24 +42,28 @@ export async function fetchAshbyJobs(boardName: string): Promise<Job[]> {
     throw new Error("Ashby board name is required.");
   }
 
-  const response = await fetch(
+  const postings = await fetchBoardWithTimeout(
     `${API_BASE_URL}/${encodeURIComponent(boardName)}`,
+    SOURCE,
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Falha ao consultar a Ashby (board "${boardName}"): ${response.status} ${response.statusText}`,
+        );
+      }
+
+      const data = (await response.json()) as { jobs?: unknown } | null;
+      const body = data?.jobs;
+
+      if (!Array.isArray(body)) {
+        throw new Error(
+          `Ashby API retornou uma resposta inválida (board "${boardName}").`,
+        );
+      }
+
+      return body;
+    },
   );
-
-  if (!response.ok) {
-    throw new Error(
-      `Falha ao consultar a Ashby (board "${boardName}"): ${response.status} ${response.statusText}`,
-    );
-  }
-
-  const data = (await response.json()) as { jobs?: unknown } | null;
-  const postings = data?.jobs;
-
-  if (!Array.isArray(postings)) {
-    throw new Error(
-      `Ashby API retornou uma resposta inválida (board "${boardName}").`,
-    );
-  }
 
   return postings
     .filter((posting) => !isUnlisted(posting))
