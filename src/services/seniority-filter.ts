@@ -2,8 +2,10 @@ import type { Job } from "../types/job.js";
 
 // Termos de senioridade alta. A regex é compilada uma única vez, no módulo.
 // Como o título é normalizado (sem acento), "sênior" chega aqui como "senior".
+// "especialista"/"specialist" é senioridade elevada (acima de pleno/sênior) e,
+// por ser palavra inteira, não bloqueia "especialização" nem "specialization".
 const SENIORITY_PATTERN =
-  /\b(senior|sr|pleno|mid[\s-]?level|staff|principal|lead)\b/;
+  /\b(senior|sr|pleno|mid[\s-]?level|staff|principal|lead|especialista|specialist)\b/;
 
 /** Remove acentos e força minúsculas, para comparar sem depender da escrita. */
 function normalize(text: string): string {
