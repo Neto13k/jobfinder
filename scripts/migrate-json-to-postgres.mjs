@@ -100,9 +100,10 @@ async function migrateAnalyzed(records) {
   for (const record of records) {
     const { rowCount } = await query(
       `insert into public.analyzed_jobs
-         (key, decision, score, reason, location_status, contract_status, analyzed_at)
-       values ($1, $2, $3, $4, $5, $6, $7)
-       on conflict (key) do nothing
+         (key, decision, score, reason, location_status, contract_status,
+          analyzed_at, criteria_version)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (key, criteria_version) do nothing
        returning key`,
       [
         String(record.key),
@@ -112,6 +113,10 @@ async function migrateAnalyzed(records) {
         String(record.locationStatus),
         String(record.contractStatus),
         new Date(record.analyzedAt).toISOString(),
+        // Preserva a versão quando existir; registros legados ficam nulos.
+        typeof record.criteriaVersion === "string"
+          ? record.criteriaVersion
+          : null,
       ],
     );
 

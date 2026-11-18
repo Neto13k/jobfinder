@@ -6,7 +6,7 @@ import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
 import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
 import {
-  getAnalyzedJob,
+  getReusableAnalysis,
   markJobAsAnalyzed,
 } from "./services/analysis-history.js";
 import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
@@ -320,8 +320,9 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
       continue;
     }
 
-    // Reaproveita a análise salva; só chama a IA quando não houver resultado.
-    let analysis: JobAnalysis | undefined = await getAnalyzedJob(job);
+    // Reaproveita a análise salva apenas se ela for da versão vigente dos
+    // critérios; análises antigas ou legadas são refeitas.
+    let analysis: JobAnalysis | undefined = await getReusableAnalysis(job);
     let origin: "nova" | "recuperada" = "recuperada";
 
     if (!analysis) {

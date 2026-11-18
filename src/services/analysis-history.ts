@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { query } from "../db/postgres.js";
-import type { JobAnalysis } from "./ai-analyzer.js";
+import { ANALYSIS_CRITERIA_VERSION, type JobAnalysis } from "./ai-analyzer.js";
 import { generateJobKey } from "./deduplication.js";
 import { getStorageBackend, withStorageLock } from "./storage.js";
 import type { Job } from "../types/job.js";
@@ -31,6 +31,8 @@ export interface AnalyzedJobRecord {
   locationStatus: JobAnalysis["locationStatus"];
   contractStatus: JobAnalysis["contractStatus"];
   analyzedAt: string;
+  /** Versão dos critérios que produziu a análise; null em registros legados. */
+  criteriaVersion: string | null;
 }
 
 /** Linha da tabela public.analyzed_jobs. */
@@ -43,6 +45,7 @@ interface AnalyzedJobRow {
   location_status: string;
   contract_status: string;
   analyzed_at: Date | string;
+  criteria_version: string | null;
 }
 
 /** Verifica se o valor tem o formato de um registro de análise. */
@@ -53,6 +56,13 @@ function isAnalyzedJobRecord(value: unknown): value is AnalyzedJobRecord {
 
   const record = value as Record<string, unknown>;
   const score = record.score;
+  const version = record.criteriaVersion;
+
+  // A versão é opcional: ausente ou null identifica um registro legado.
+  const versionValid =
+    version === undefined ||
+    version === null ||
+    (typeof version === "string" && version.trim() !== "");
 
   return (
     typeof record.key === "string" &&
@@ -67,7 +77,8 @@ function isAnalyzedJobRecord(value: unknown): value is AnalyzedJobRecord {
     !Number.isNaN(Date.parse(record.analyzedAt)) &&
     DECISIONS.includes(record.decision as JobAnalysis["decision"]) &&
     STATUSES.includes(record.locationStatus as JobAnalysis["locationStatus"]) &&
-    STATUSES.includes(record.contractStatus as JobAnalysis["contractStatus"])
+    STATUSES.includes(record.contractStatus as JobAnalysis["contractStatus"]) &&
+    versionValid
   );
 }
 
@@ -129,6 +140,8 @@ function rowToRecord(row: AnalyzedJobRow): AnalyzedJobRecord {
     locationStatus: row.location_status as JobAnalysis["locationStatus"],
     contractStatus: row.contract_status as JobAnalysis["contractStatus"],
     analyzedAt: new Date(row.analyzed_at).toISOString(),
+    criteriaVersion:
+      typeof row.criteria_version === "string" ? row.criteria_version : null,
   };
 }
 
@@ -154,12 +167,14 @@ export async function isJobAnalyzed(job: Job): Promise<boolean> {
 }
 
 /**
- * Retorna o resultado preservado da análise, quando existir.
+ * Retorna o resultado da análise mais recente da vaga, quando existir.
  *
- * Útil para inspecionar vagas incompatíveis ou marcadas para revisão.
+ * Como o histórico preserva uma linha por versão de critérios, devolve sempre
+ * a versão mais recente. Útil para inspecionar vagas incompatíveis ou marcadas
+ * para revisão.
  *
  * @param job Vaga consultada.
- * @returns O registro da análise ou undefined se ainda não analisada.
+ * @returns O registro mais recente ou undefined se ainda não analisada.
  */
 export async function getAnalyzedJob(
   job: Job,
@@ -169,9 +184,10 @@ export async function getAnalyzedJob(
   if (getStorageBackend() === "postgres") {
     const { rows } = await query<AnalyzedJobRow>(
       `select key, decision, score, reason,
-              location_status, contract_status, analyzed_at
+              location_status, contract_status, analyzed_at, criteria_version
          from public.analyzed_jobs
         where key = $1
+        order by analyzed_at desc
         limit 1`,
       [key],
     );
@@ -180,11 +196,59 @@ export async function getAnalyzedJob(
   }
 
   const records = await readJsonHistory();
-  return records.find((record) => record.key === key);
+  return records
+    .filter((record) => record.key === key)
+    .reduce<AnalyzedJobRecord | undefined>(
+      (latest, record) =>
+        !latest || record.analyzedAt > latest.analyzedAt ? record : latest,
+      undefined,
+    );
 }
 
 /**
- * Registra a vaga como analisada, preservando o resultado.
+ * Retorna a análise armazenada apenas quando ela foi produzida com a versão
+ * vigente dos critérios.
+ *
+ * Análises de versões anteriores — inclusive registros legados, sem versão —
+ * são ignoradas para forçar a reanálise. Os resultados antigos permanecem
+ * armazenados, apenas não são reutilizados.
+ *
+ * @param job Vaga consultada.
+ * @returns O registro da versão vigente ou undefined se precisar reanalisar.
+ */
+export async function getReusableAnalysis(
+  job: Job,
+): Promise<AnalyzedJobRecord | undefined> {
+  const key = generateJobKey(job);
+
+  if (getStorageBackend() === "postgres") {
+    const { rows } = await query<AnalyzedJobRow>(
+      `select key, decision, score, reason,
+              location_status, contract_status, analyzed_at, criteria_version
+         from public.analyzed_jobs
+        where key = $1 and criteria_version = $2
+        limit 1`,
+      [key, ANALYSIS_CRITERIA_VERSION],
+    );
+
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
+  }
+
+  const records = await readJsonHistory();
+  return records.find(
+    (record) =>
+      record.key === key &&
+      record.criteriaVersion === ANALYSIS_CRITERIA_VERSION,
+  );
+}
+
+/**
+ * Registra a análise da vaga para a versão vigente dos critérios.
+ *
+ * A idempotência é por vaga **e** versão: se já existir uma análise da versão
+ * vigente, ela é preservada (nada é sobrescrito). Se a vaga já possuir análises
+ * de versões anteriores, essas permanecem intactas e um novo registro é
+ * acrescentado — nenhum resultado antigo é apagado ou alterado.
  *
  * Não marca a vaga como notificada; esse registro é separado.
  *
@@ -198,12 +262,14 @@ export async function markJobAsAnalyzed(
   const key = generateJobKey(job);
 
   if (getStorageBackend() === "postgres") {
-    // Idempotente: não sobrescreve uma análise já existente.
+    // Acrescenta a análise da versão vigente. O conflito por (key, versão)
+    // preserva qualquer resultado já gravado para o mesmo par (idempotente).
     await query(
       `insert into public.analyzed_jobs
-         (key, decision, score, reason, location_status, contract_status)
-       values ($1, $2, $3, $4, $5, $6)
-       on conflict (key) do nothing`,
+         (key, decision, score, reason, location_status, contract_status,
+          criteria_version)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (key, criteria_version) do nothing`,
       [
         key,
         analysis.decision,
@@ -211,6 +277,7 @@ export async function markJobAsAnalyzed(
         analysis.reason,
         analysis.locationStatus,
         analysis.contractStatus,
+        ANALYSIS_CRITERIA_VERSION,
       ],
     );
     return;
@@ -218,11 +285,19 @@ export async function markJobAsAnalyzed(
 
   await withStorageLock(async () => {
     const records = await readJsonHistory();
+    const existing = records.find(
+      (record) =>
+        record.key === key &&
+        record.criteriaVersion === ANALYSIS_CRITERIA_VERSION,
+    );
 
-    if (records.some((record) => record.key === key)) {
+    // Já existe análise da versão vigente: preserva o resultado (idempotente).
+    if (existing) {
       return;
     }
 
+    // Acrescenta um novo registro para a versão vigente, sem alterar nem
+    // excluir os resultados de versões anteriores.
     records.push({
       key,
       decision: analysis.decision,
@@ -231,6 +306,7 @@ export async function markJobAsAnalyzed(
       locationStatus: analysis.locationStatus,
       contractStatus: analysis.contractStatus,
       analyzedAt: new Date().toISOString(),
+      criteriaVersion: ANALYSIS_CRITERIA_VERSION,
     });
 
     await writeJsonHistory(records);
