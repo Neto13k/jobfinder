@@ -29,7 +29,6 @@ export type JobSource = BoardJobSource | LinkedInJobSource | IndeedJobSource;
  * e são selecionadas por lote em `services/linkedin-search-rotation.ts`.
  */
 export const BOARD_JOB_SOURCES: readonly BoardJobSource[] = [
-  { provider: "greenhouse", identifier: "stripe" },
   { provider: "lever", identifier: "Flex" },
   { provider: "ashby", identifier: "Ashby" },
 ];
