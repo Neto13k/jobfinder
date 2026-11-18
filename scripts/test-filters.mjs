@@ -74,6 +74,24 @@ test("filtro de senioridade exclui cargos altos e mantém júnior/estágio", () 
   ]);
 });
 
+test("filtro de senioridade bloqueia especialista/specialist e preserva os demais", () => {
+  const kept = filterBySeniority([
+    job({ title: "Engenheiro Fullstack - Especialista" }),
+    job({ title: "Software Engineer Specialist" }),
+    job({ title: "Desenvolvedor Júnior" }),
+    job({ title: "Estágio em Desenvolvimento de Software" }),
+    job({ title: "Desenvolvedor Full Stack" }),
+    job({ title: "Desenvolvedor com foco em especialização" }),
+  ]);
+  const titles = kept.map((item) => item.title);
+  assert.deepEqual(titles, [
+    "Desenvolvedor Júnior",
+    "Estágio em Desenvolvimento de Software",
+    "Desenvolvedor Full Stack",
+    "Desenvolvedor com foco em especialização",
+  ]);
+});
+
 test("filtro de localização bloqueia restrição estrangeira explícita", () => {
   assert.equal(
     classifyJobLocation(job({ location: "US residents only" })),
