@@ -18,6 +18,7 @@ import {
   getReusableAnalysis,
   markJobAsAnalyzed,
 } from "./services/analysis-history.js";
+import { runAudit } from "./services/audit-report.js";
 import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
@@ -49,6 +50,11 @@ import {
 } from "./services/indeed-search-rotation.js";
 import { getStorageBackend } from "./services/storage.js";
 import type { Job } from "./types/job.js";
+
+// Modo de auditoria (`--audit-only`): repete a coleta e a triagem atuais, grava
+// o relatório em `data/audit/` e encerra antes da análise — sem IA, históricos,
+// Supabase ou Telegram. Não altera a execução normal.
+const AUDIT_ONLY = process.argv.includes("--audit-only");
 
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
 const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
@@ -552,9 +558,118 @@ export async function processJobs(
   return summary;
 }
 
+/** Opções do processamento pós-coleta, injetáveis nos testes. */
+export interface PipelineOptions {
+  /** Grava o relatório de auditoria e encerra antes da análise. */
+  auditOnly?: boolean;
+  /** Diretório de saída do relatório de auditoria (padrão: `data/audit`). */
+  auditDirectory?: string;
+  /** Instante de referência da priorização (padrão: agora). */
+  referenceDate?: Date;
+  /** Dependências de análise e notificação (padrão: implementações reais). */
+  dependencies?: ProcessDependencies;
+}
+
+/**
+ * Aplica a triagem atual às vagas coletadas e segue para a análise.
+ *
+ * Em modo de auditoria (`auditOnly`), reutiliza as MESMAS funções puras
+ * (deduplicação, filtros e priorização), grava o relatório e encerra ANTES de
+ * qualquer análise: não chama a IA, não consulta nem grava históricos, não
+ * acessa o Supabase e não envia notificações, devolvendo null. Fora do modo de
+ * auditoria, mantém exatamente o comportamento normal.
+ *
+ * @param jobs Vagas coletadas (antes da deduplicação).
+ * @param options Opções injetáveis (auditoria, diretório, dependências).
+ * @returns O resumo do processamento normal, ou null quando encerrou na auditoria.
+ */
+export async function runPipeline(
+  jobs: Job[],
+  options: PipelineOptions = {},
+): Promise<RunSummary | null> {
+  // Modo de auditoria: mesma coleta e mesmos filtros, sem IA, históricos,
+  // Supabase ou Telegram. Grava o relatório e encerra antes da análise.
+  if (options.auditOnly) {
+    const { report, filePath } = await runAudit(jobs, {
+      referenceDate: options.referenceDate,
+      directory: options.auditDirectory,
+    });
+
+    console.log(
+      `Auditoria: ${report.totalCollected} coletada(s) | ` +
+        `${report.uniqueJobs} única(s) | ${report.approved} aprovada(s) nos filtros`,
+    );
+    console.log(`Relatório de auditoria gravado em: ${filePath}`);
+
+    return null;
+  }
+
+  // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
+  const uniqueJobs = deduplicateJobs(jobs);
+  const developerJobs = filterDeveloperJobs(uniqueJobs);
+  const seniorityJobs = filterBySeniority(developerJobs);
+  const eligibleJobs = filterByLocation(seniorityJobs);
+  // Ordena por prioridade geográfica sem descartar vagas elegíveis.
+  const prioritizedJobs = prioritizeJobs(eligibleJobs);
+
+  // Grupos descartados por etapa, derivados por identidade de objeto (os
+  // filtros preservam as referências), sem alterar as regras de elegibilidade.
+  const developerSet = new Set(developerJobs);
+  const senioritySet = new Set(seniorityJobs);
+  const discardedByDedupe = jobs.length - uniqueJobs.length;
+  const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
+  const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
+  // Classificação da localização apenas para observabilidade (função pura).
+  const locationByJob = new Map<Job, JobLocation>();
+  for (const job of seniorityJobs) {
+    locationByJob.set(job, classifyJobLocation(job));
+  }
+  const blockedByLocation = seniorityJobs.filter(
+    (job) => locationByJob.get(job) === "blocked",
+  );
+  const unknownLocationJobs = seniorityJobs.filter(
+    (job) => locationByJob.get(job) === "unknown",
+  );
+
+  console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
+  console.log(`Desenvolvimento: ${developerJobs.length}`);
+  console.log(`Após senioridade: ${seniorityJobs.length}`);
+  console.log(`Após localização: ${eligibleJobs.length}`);
+  console.log(`Armazenamento: ${getStorageBackend()}`);
+  console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
+
+  // Detalhamento dos descartes de cada filtro, com exemplos.
+  console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
+  logJobGroup("Descartadas por desenvolvimento", discardedByDeveloper);
+  logJobGroup("Descartadas por senioridade", discardedBySeniority);
+  logJobGroup("Bloqueadas por localização", blockedByLocation);
+  logJobGroup("Localização indefinida", unknownLocationJobs);
+
+  const summary = await processJobs(prioritizedJobs, options.dependencies);
+
+  console.log(
+    `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
+      `${summary.recovered} recuperada(s) do histórico | ` +
+      `${summary.compatible} compatível(is) | ${summary.incompatible} incompatível(is) | ` +
+      `${summary.review} em revisão | ` +
+      `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
+      `${summary.sentReview} notificação(ões) de revisão | ` +
+      `${summary.failedAnalyses} análise(s) malsucedida(s) | ` +
+      `${summary.unanalyzedByLimit} não analisada(s) por limite (histórico consultado) | ` +
+      `${summary.unanalyzedByGemini} não analisada(s) por indisponibilidade da IA | ` +
+      `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
+  );
+
+  return summary;
+}
+
 /**
  * Coleta das fontes, filtra, prioriza, analisa as vagas novas e (opcionalmente)
  * notifica no máximo uma vaga por execução.
+ *
+ * Com `--audit-only`, executa a mesma coleta e triagem, grava o relatório de
+ * auditoria em `data/audit/` e encerra antes da análise, sem IA, históricos,
+ * Supabase ou Telegram.
  */
 async function main() {
   try {
@@ -574,60 +689,8 @@ async function main() {
 
     // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
     const jobs = [...boardCollected.flat(), ...rotatedCollected];
-    const uniqueJobs = deduplicateJobs(jobs);
-    const developerJobs = filterDeveloperJobs(uniqueJobs);
-    const seniorityJobs = filterBySeniority(developerJobs);
-    const eligibleJobs = filterByLocation(seniorityJobs);
-    // Ordena por prioridade geográfica sem descartar vagas elegíveis.
-    const prioritizedJobs = prioritizeJobs(eligibleJobs);
 
-    // Grupos descartados por etapa, derivados por identidade de objeto (os
-    // filtros preservam as referências), sem alterar as regras de elegibilidade.
-    const developerSet = new Set(developerJobs);
-    const senioritySet = new Set(seniorityJobs);
-    const discardedByDedupe = jobs.length - uniqueJobs.length;
-    const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
-    const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
-    // Classificação da localização apenas para observabilidade (função pura).
-    const locationByJob = new Map<Job, JobLocation>();
-    for (const job of seniorityJobs) {
-      locationByJob.set(job, classifyJobLocation(job));
-    }
-    const blockedByLocation = seniorityJobs.filter(
-      (job) => locationByJob.get(job) === "blocked",
-    );
-    const unknownLocationJobs = seniorityJobs.filter(
-      (job) => locationByJob.get(job) === "unknown",
-    );
-
-    console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
-    console.log(`Desenvolvimento: ${developerJobs.length}`);
-    console.log(`Após senioridade: ${seniorityJobs.length}`);
-    console.log(`Após localização: ${eligibleJobs.length}`);
-    console.log(`Armazenamento: ${getStorageBackend()}`);
-    console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
-
-    // Detalhamento dos descartes de cada filtro, com exemplos.
-    console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
-    logJobGroup("Descartadas por desenvolvimento", discardedByDeveloper);
-    logJobGroup("Descartadas por senioridade", discardedBySeniority);
-    logJobGroup("Bloqueadas por localização", blockedByLocation);
-    logJobGroup("Localização indefinida", unknownLocationJobs);
-
-    const summary = await processJobs(prioritizedJobs);
-
-    console.log(
-      `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
-        `${summary.recovered} recuperada(s) do histórico | ` +
-        `${summary.compatible} compatível(is) | ${summary.incompatible} incompatível(is) | ` +
-        `${summary.review} em revisão | ` +
-        `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
-        `${summary.sentReview} notificação(ões) de revisão | ` +
-        `${summary.failedAnalyses} análise(s) malsucedida(s) | ` +
-        `${summary.unanalyzedByLimit} não analisada(s) por limite (histórico consultado) | ` +
-        `${summary.unanalyzedByGemini} não analisada(s) por indisponibilidade da IA | ` +
-        `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
-    );
+    await runPipeline(jobs, { auditOnly: AUDIT_ONLY });
   } catch (error) {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
     const message = error instanceof Error ? error.message : String(error);
