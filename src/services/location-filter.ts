@@ -339,14 +339,16 @@ function evaluateResidenceRestriction(
 /**
  * Classifica a localização de uma vaga.
  *
- * allowed: presencial/híbrido em Maceió/AL ou remoto elegível a residentes no
- *          Brasil (país, região LATAM/global ou cidade/estado brasileiro).
+ * allowed: presencial/híbrido em Maceió/AL; remoto elegível a residentes no
+ *          Brasil (país, região LATAM/global ou cidade/estado brasileiro); ou
+ *          remoto sem restrição geográfica explícita (presunção operacional de
+ *          elegibilidade, não uma confirmação de disponibilidade no Brasil).
  * blocked: presencial/híbrido explícito fora de Maceió, restrição explícita a
  *          residentes de outro país ou exclusão explícita do Brasil.
- * unknown: modalidade desconhecida, sinais contraditórios, elegibilidade
- *          geográfica incerta (ex.: exigência estrangeira com alternativa no
- *          Brasil, localização estrangeira com elegibilidade explícita ao
- *          Brasil na descrição) ou restrição de residência não classificável.
+ * unknown: modalidade desconhecida, sinais geográficos contraditórios (ex.:
+ *          exigência estrangeira com alternativa no Brasil, localização
+ *          estrangeira com elegibilidade explícita ao Brasil na descrição) ou
+ *          restrição de residência não classificável.
  *
  * A elegibilidade brasileira é admitida na LOCALIZAÇÃO da vaga, em exigências
  * explícitas de residência ou quando a DESCRIÇÃO declara explicitamente aceitar
@@ -399,31 +401,33 @@ export function classifyJobLocation(job: Job): JobLocation {
     return location ? "blocked" : "unknown";
   }
 
-  // Remoto explícito: exige evidência de elegibilidade para residentes no Brasil.
+  // Remoto explícito: sem restrição geográfica contraditória, presume-se
+  // elegibilidade operacional.
   if (modality === "remote") {
     if (locationEligible) {
       return "allowed";
     }
 
     // Localização estrangeira explícita. Se a descrição indicar de forma
-    // EXPLÍCITA que aceita candidatos residentes no Brasil, preserva a vaga
-    // como indefinida para a IA; menções genéricas (clientes, escritórios,
-    // empresa global) NÃO liberam e a vaga permanece bloqueada.
+    // EXPLÍCITA que aceita candidatos residentes no Brasil, as evidências são
+    // contraditórias e a vaga fica indefinida para a IA; menções genéricas
+    // (clientes, escritórios, empresa global) NÃO liberam e a vaga permanece
+    // bloqueada.
     if (FOREIGN_LOCATION.test(location)) {
       return BRAZIL_ELIGIBILITY.test(description) ? "unknown" : "blocked";
     }
 
     // Localização sem país/região estrangeiro contraditório (vazia ou genérica,
     // como "Remote"/"Remoto"): se a descrição declara de forma EXPLÍCITA aceitar
-    // candidatos residentes no Brasil, a vaga é elegível. A ausência de restrição
-    // NÃO conta como elegibilidade — só a evidência explícita libera a vaga; os
-    // casos realmente indefinidos seguem conservadoramente como "unknown".
+    // candidatos residentes no Brasil, a vaga é elegível.
     if (BRAZIL_ELIGIBILITY.test(description)) {
       return "allowed";
     }
 
-    // Sem informação geográfica suficiente para confirmar: indefinida.
-    return "unknown";
+    // Sem qualquer evidência de restrição geográfica ou sinal contraditório:
+    // presume-se elegibilidade operacional. É uma presunção de triagem, não uma
+    // confirmação de disponibilidade no Brasil.
+    return "allowed";
   }
 
   // Modalidade desconhecida: mantém a triagem conservadora já existente.

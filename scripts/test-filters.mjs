@@ -460,7 +460,7 @@ test("triagem geográfica: remoto LATAM e Worldwide são preservados", () => {
   );
 });
 
-test("triagem geográfica: remoto sem informação geográfica permanece indefinido", () => {
+test("triagem geográfica: remoto sem informação geográfica é presumido elegível", () => {
   assert.equal(
     classifyJobLocation(
       job({
@@ -470,7 +470,7 @@ test("triagem geográfica: remoto sem informação geográfica permanece indefin
         description: "",
       }),
     ),
-    "unknown",
+    "allowed",
   );
 });
 
@@ -688,16 +688,17 @@ test("triagem geográfica: elegibilidade explícita não confunde menções gen�
   );
 });
 
-// --- TASK-01: elegibilidade EXPLÍCITA ao Brasil em vagas remotas -----------
+// --- TASK-01: presunção operacional de elegibilidade em vagas remotas ------
 //
-// Correção do filtro geográfico: vagas remotas sem localidade estrangeira
-// contraditória passam a ser "allowed" quando a DESCRIÇÃO declara de forma
-// explícita aceitar residentes no Brasil. A ausência de restrição continua NÃO
-// sendo tratada como elegibilidade (permanece "unknown").
+// Revisão do filtro geográfico: vagas remotas sem restrição geográfica
+// contraditória passam a ser "allowed" (presunção operacional, NÃO uma
+// confirmação de disponibilidade no Brasil). Bloqueios explícitos (restrição a
+// residentes de outro país, exclusão do Brasil) seguem "blocked" e os sinais
+// geográficos contraditórios seguem "unknown".
 
-test("TASK-01: remote e remoto sem país informado permanecem indefinidos", () => {
-  // Localização genérica ("Remote"/"Remoto") sem país e sem evidência explícita:
-  // a ausência de restrição NÃO confirma elegibilidade.
+test("TASK-01: remote e remoto sem país informado são presumidos elegíveis", () => {
+  // Localização genérica ("Remote"/"Remoto") sem país e sem restrição: a
+  // ausência de restrição geográfica presume elegibilidade operacional.
   assert.equal(
     classifyJobLocation(
       job({
@@ -707,7 +708,7 @@ test("TASK-01: remote e remoto sem país informado permanecem indefinidos", () =
         description: "",
       }),
     ),
-    "unknown",
+    "allowed",
   );
   assert.equal(
     classifyJobLocation(
@@ -718,11 +719,11 @@ test("TASK-01: remote e remoto sem país informado permanecem indefinidos", () =
         description: "",
       }),
     ),
-    "unknown",
+    "allowed",
   );
 });
 
-test("TASK-01: localização vazia com remote=true permanece indefinida sem evidência", () => {
+test("TASK-01: localização vazia com remote=true é presumida elegível", () => {
   assert.equal(
     classifyJobLocation(
       job({
@@ -732,7 +733,7 @@ test("TASK-01: localização vazia com remote=true permanece indefinida sem evid
         description: "",
       }),
     ),
-    "unknown",
+    "allowed",
   );
   assert.equal(
     classifyJobLocation(
@@ -743,7 +744,7 @@ test("TASK-01: localização vazia com remote=true permanece indefinida sem evid
         description: "Buscamos pessoa desenvolvedora para integrar o time.",
       }),
     ),
-    "unknown",
+    "allowed",
   );
 });
 
@@ -799,8 +800,9 @@ test("TASK-01: localização vazia com remote=true e elegibilidade explícita é
   );
 });
 
-test("TASK-01: menção genérica na descrição não comprova elegibilidade brasileira", () => {
-  // Clientes e escritórios no Brasil NÃO são elegibilidade: permanece indefinida.
+test("TASK-01: menção genérica na descrição não altera a presunção de elegibilidade", () => {
+  // Clientes e escritórios no Brasil são apenas menções genéricas: não mudam o
+  // resultado de uma vaga remota sem restrição geográfica (segue presumida).
   assert.equal(
     classifyJobLocation(
       job({
@@ -810,7 +812,7 @@ test("TASK-01: menção genérica na descrição não comprova elegibilidade bra
         description: "Atendemos clientes em todo o Brasil.",
       }),
     ),
-    "unknown",
+    "allowed",
   );
   assert.equal(
     classifyJobLocation(
@@ -821,13 +823,14 @@ test("TASK-01: menção genérica na descrição não comprova elegibilidade bra
         description: "Somos uma empresa global com escritório no Brasil.",
       }),
     ),
-    "unknown",
+    "allowed",
   );
 });
 
-test("TASK-01: vaga remota de fonte brasileira NÃO é presumida elegível", () => {
-  // A procedência (InHire, ATS brasileiro) NÃO confere elegibilidade: sem
-  // evidência explícita na localização/descrição, permanece indefinida.
+test("TASK-01: procedência da fonte não altera a presunção de elegibilidade", () => {
+  // A procedência da fonte (InHire, ATS brasileiro) é irrelevante para a
+  // classificação: uma vaga remota sem restrição geográfica é presumida
+  // elegível, com ou sem evidência explícita na descrição.
   assert.equal(
     classifyJobLocation(
       job({
@@ -838,9 +841,9 @@ test("TASK-01: vaga remota de fonte brasileira NÃO é presumida elegível", () 
         source: "inhire",
       }),
     ),
-    "unknown",
+    "allowed",
   );
-  // Com evidência explícita, a mesma procedência passa a ser permitida.
+  // Com evidência explícita, a mesma procedência continua permitida.
   assert.equal(
     classifyJobLocation(
       job({
@@ -855,7 +858,7 @@ test("TASK-01: vaga remota de fonte brasileira NÃO é presumida elegível", () 
   );
 });
 
-test("TASK-01: vaga remota de fonte internacional depende da evidência geográfica", () => {
+test("TASK-01: vaga remota de fonte internacional é presumida elegível salvo bloqueio explícito", () => {
   // Fonte internacional com localização brasileira explícita: permitida.
   assert.equal(
     classifyJobLocation(
@@ -869,7 +872,7 @@ test("TASK-01: vaga remota de fonte internacional depende da evidência geográf
     ),
     "allowed",
   );
-  // Fonte internacional sem país informado e sem evidência: indefinida.
+  // Fonte internacional sem país informado e sem restrição: presumida elegível.
   assert.equal(
     classifyJobLocation(
       job({
@@ -880,7 +883,7 @@ test("TASK-01: vaga remota de fonte internacional depende da evidência geográf
         source: "linkedin",
       }),
     ),
-    "unknown",
+    "allowed",
   );
   // Fonte internacional com restrição estrangeira explícita: bloqueada.
   assert.equal(
