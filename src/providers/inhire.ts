@@ -1,5 +1,11 @@
+import { performance } from "node:perf_hooks";
+
 import type { Job } from "../types/job.js";
-import { fetchBoardWithTimeout } from "./board-http.js";
+import {
+  BoardTimeoutError,
+  fetchBoardWithTimeout,
+  isTimeoutError,
+} from "./board-http.js";
 
 /** Origem das vagas. */
 const SOURCE = "inhire";
@@ -16,6 +22,32 @@ const API_BASE_URL = "https://api.inhire.app/job-posts/public/pages";
  * empresas coletadas em paralelo pelo pipeline.
  */
 const REQUEST_PACING_MS = 250;
+
+/**
+ * Intervalo mínimo, compartilhado por todas as empresas, entre os inícios das
+ * requisições InHire (listagens e detalhes), em milissegundos.
+ *
+ * A pausa por empresa ({@link REQUEST_PACING_MS}) não limita o agregado quando
+ * várias empresas rodam em paralelo. Este teto compartilhado garante um limite
+ * global (≈ 1 / 60 ms ≈ 16 req/s), abaixo do limite sustentado de 20 req/s
+ * informado pela InHire, independentemente da concorrência. Cobre listagens e
+ * detalhes: a listagem de cada empresa também é uma requisição e, somada aos
+ * detalhes, não pode ultrapassar o limite compartilhado.
+ */
+export const MIN_REQUEST_INTERVAL_MS = 60;
+
+/**
+ * Máximo de timeouts consecutivos nas requisições de detalhe de uma empresa
+ * antes de abandonar os detalhes restantes.
+ *
+ * Timeouts repetidos sinalizam instabilidade da API para aquela empresa; nesse
+ * caso os detalhes restantes são ignorados para não consumir o orçamento de
+ * tempo da execução, preservando as vagas já coletadas. Uma requisição
+ * bem-sucedida reinicia o contador, de modo que empresas lentas porém saudáveis
+ * (muitas vagas, sem falhas) nunca são truncadas — não há limite de quantidade
+ * de vagas nem de tempo fixo.
+ */
+const MAX_CONSECUTIVE_DETAIL_TIMEOUTS = 3;
 
 /**
  * Número máximo de empresas (tenants) InHire coletadas simultaneamente.
@@ -126,6 +158,41 @@ function releaseTenantSlot(): void {
   activeTenants--;
 }
 
+// --- Teto agregado compartilhado entre requisições (listagens e detalhes) ----
+
+// Instante (relógio monotônico, ms) em que a próxima requisição InHire pode
+// iniciar. O estado vive no módulo, então o teto vale para todas as empresas e
+// abrange tanto as listagens quanto os detalhes.
+let nextRequestAllowedAt = 0;
+
+/** Relógio monotônico em milissegundos, imune a ajustes do relógio de parede. */
+function monotonicNow(): number {
+  return performance.now();
+}
+
+/**
+ * Aguarda o intervalo mínimo compartilhado entre os inícios das requisições
+ * InHire (listagens e detalhes).
+ *
+ * A reserva do próximo instante é síncrona, então chamadas concorrentes de
+ * empresas distintas recebem instantes distintos e o espaçamento nunca é
+ * comprimido. Usa relógio monotônico para não depender de ajustes do relógio de
+ * parede. Quando o laço de eventos atrasa uma chamada (o instante reservado já
+ * passou), a próxima reserva parte do instante atual — e não do agendamento
+ * vencido — mantendo o espaçamento entre os inícios efetivos. Apenas o disparo
+ * é ordenado; a espera pela resposta HTTP não é serializada.
+ */
+async function waitForRequestSlot(): Promise<void> {
+  const now = monotonicNow();
+  const startAt = Math.max(now, nextRequestAllowedAt);
+  nextRequestAllowedAt = startAt + MIN_REQUEST_INTERVAL_MS;
+
+  const wait = startAt - now;
+  if (wait > 0) {
+    await delay(wait);
+  }
+}
+
 /**
  * Busca as vagas de uma empresa (tenant) na InHire e as normaliza para
  * {@link Job}.
@@ -138,11 +205,15 @@ function releaseTenantSlot(): void {
  * data da coleta nunca é usada como data de publicação.
  *
  * As requisições usam o timeout dos boards públicos (ver
- * {@link fetchBoardWithTimeout}) e são espaçadas por {@link REQUEST_PACING_MS}.
- * A concorrência entre empresas é limitada a
- * {@link INHIRE_MAX_CONCURRENT_TENANTS} por execução. Não há novas tentativas:
- * em rate limiting (HTTP 429), os detalhes restantes da empresa são
- * abandonados, preservando as vagas já coletadas.
+ * {@link fetchBoardWithTimeout}); os inícios são espaçados por
+ * {@link REQUEST_PACING_MS} (por empresa) e por {@link MIN_REQUEST_INTERVAL_MS}
+ * (teto agregado compartilhado entre listagens e detalhes). A concorrência
+ * entre empresas é limitada a {@link INHIRE_MAX_CONCURRENT_TENANTS} por
+ * execução. Não há limite de quantidade de vagas nem de tempo fixo; os detalhes
+ * de uma empresa só são abandonados após
+ * {@link MAX_CONSECUTIVE_DETAIL_TIMEOUTS} timeouts consecutivos ou em rate
+ * limiting (HTTP 429), sempre preservando as vagas já coletadas. Não há novas
+ * tentativas.
  *
  * @param tenant Identificador (X-Tenant) da empresa na InHire.
  * @throws {BoardTimeoutError} Se a listagem exceder o timeout.
@@ -167,6 +238,9 @@ export async function fetchInhireJobs(tenant: string): Promise<Job[]> {
 /** Coleta e normaliza as vagas de uma empresa (já com vaga de concorrência). */
 async function collectTenantJobs(slug: string): Promise<Job[]> {
   const headers = { "X-Tenant": slug };
+
+  // A listagem também passa pelo teto agregado compartilhado, junto aos detalhes.
+  await waitForRequestSlot();
 
   const page = await fetchBoardWithTimeout(
     API_BASE_URL,
@@ -208,6 +282,10 @@ async function collectTenantJobs(slug: string): Promise<Job[]> {
       : slug;
 
   const jobs: Job[] = [];
+  // Timeouts de detalhe consecutivos desta empresa; uma resposta bem-sucedida
+  // reinicia o contador. Ao atingir o limite, os detalhes restantes são
+  // abandonados preservando as vagas já coletadas.
+  let consecutiveTimeouts = 0;
 
   for (let index = 0; index < summaries.length; index++) {
     const summary = summaries[index];
@@ -221,11 +299,16 @@ async function collectTenantJobs(slug: string): Promise<Job[]> {
       await delay(REQUEST_PACING_MS);
     }
 
+    // Respeita o teto agregado compartilhado antes de cada detalhe.
+    await waitForRequestSlot();
+
     // O try abrange o detalhe E a normalização (`toJob`): qualquer falha
     // descarta apenas esta vaga, preservando as já coletadas e as seguintes.
     try {
       const detail = await fetchJobDetail(slug, summary.jobId, headers);
       jobs.push(toJob(summary, detail, slug, tenantName));
+      // Requisição bem-sucedida: reinicia a contagem de timeouts consecutivos.
+      consecutiveTimeouts = 0;
     } catch (error) {
       if (error instanceof InhireRequestError && error.status === 429) {
         console.warn(
@@ -236,8 +319,31 @@ async function collectTenantJobs(slug: string): Promise<Job[]> {
         break;
       }
 
-      // Falha pontual (detalhe ou normalização) isola apenas a vaga afetada.
       const message = error instanceof Error ? error.message : String(error);
+
+      // Timeout do detalhe: conta a falha; após o limite, abandona os detalhes
+      // restantes preservando as vagas já coletadas. Timeouts isolados apenas
+      // descartam a vaga afetada.
+      if (error instanceof BoardTimeoutError || isTimeoutError(error)) {
+        consecutiveTimeouts++;
+
+        if (consecutiveTimeouts >= MAX_CONSECUTIVE_DETAIL_TIMEOUTS) {
+          console.warn(
+            `${MAX_CONSECUTIVE_DETAIL_TIMEOUTS} timeouts consecutivos na InHire ` +
+              `(tenant "${slug}"): ${jobs.length} vaga(s) preservada(s); ` +
+              "detalhes restantes ignorados.",
+          );
+          break;
+        }
+
+        console.error(
+          `Timeout ao processar a vaga ${summary.jobId} (tenant "${slug}") ` +
+            `[${consecutiveTimeouts}/${MAX_CONSECUTIVE_DETAIL_TIMEOUTS}]: ${message}`,
+        );
+        continue;
+      }
+
+      // Falha pontual (detalhe ou normalização) isola apenas a vaga afetada.
       console.error(
         `Falha ao processar a vaga ${summary.jobId} (tenant "${slug}"): ${message}`,
       );

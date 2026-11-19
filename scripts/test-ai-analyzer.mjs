@@ -12,6 +12,9 @@ import assert from "node:assert/strict";
 const { buildPrompt, parseAnalysis, SYSTEM_INSTRUCTION } = await import(
   "../dist/services/ai-analyzer.js"
 );
+const { classifyGeminiError, GeminiAnalysisError } = await import(
+  "../dist/services/ai-analyzer.js"
+);
 
 /** Monta uma vaga mínima com os campos sobrepostos. */
 function job(overrides) {
@@ -166,4 +169,68 @@ test("parseAnalysis rejeita respostas estruturalmente inválidas", () => {
   assert.throws(() => parseAnalysis({ ...VALID, score: "90" }), /score/);
   assert.throws(() => parseAnalysis({ ...VALID, score: Number.NaN }), /score/);
   assert.throws(() => parseAnalysis({ ...VALID, reason: "   " }), /reason/);
+});
+
+// --- Classificação das falhas do Gemini ------------------------------------
+//
+// A resiliência do pipeline depende de distinguir falhas temporárias/globais
+// (cota, indisponibilidade, rede, autenticação) das falhas da própria resposta.
+// A classificação usa apenas sinais estruturados (status HTTP e nome do erro de
+// cancelamento), então pode ser validada sem chamar a API.
+
+test("classifyGeminiError categoriza falhas HTTP por status", () => {
+  // 429: limite de requisições ou cota esgotada.
+  assert.deepEqual(classifyGeminiError({ status: 429 }), {
+    kind: "rate_limit",
+    status: 429,
+  });
+
+  // 401/403: credencial ausente, inválida ou sem permissão.
+  assert.equal(classifyGeminiError({ status: 401 }).kind, "auth");
+  assert.equal(classifyGeminiError({ status: 403 }).kind, "auth");
+
+  // 408 e 5xx: indisponibilidade temporária do serviço.
+  for (const status of [408, 500, 502, 503, 504]) {
+    assert.deepEqual(classifyGeminiError({ status }), {
+      kind: "unavailable",
+      status,
+    });
+  }
+});
+
+test("classifyGeminiError trata o cancelamento por timeout", () => {
+  const abort = new Error("abortado");
+  abort.name = "AbortError";
+  assert.deepEqual(classifyGeminiError(abort), { kind: "timeout" });
+
+  const timeout = new Error("timeout");
+  timeout.name = "TimeoutError";
+  assert.deepEqual(classifyGeminiError(timeout), { kind: "timeout" });
+});
+
+test("classifyGeminiError trata status desconhecido e erros sem status", () => {
+  // Status fora das faixas conhecidas permanece com o status preservado.
+  assert.deepEqual(classifyGeminiError({ status: 400 }), {
+    kind: "unknown",
+    status: 400,
+  });
+
+  // Erro sem status (falha de rede local) é "unknown" sem status.
+  assert.deepEqual(classifyGeminiError(new Error("ECONNRESET")), {
+    kind: "unknown",
+  });
+
+  // Valores que não são inteiros não são aceitos como status.
+  assert.deepEqual(classifyGeminiError({ status: "429" }), { kind: "unknown" });
+  assert.deepEqual(classifyGeminiError(null), { kind: "unknown" });
+});
+
+test("GeminiAnalysisError preserva categoria, status e identidade", () => {
+  const error = new GeminiAnalysisError("rate_limit", "cota", { status: 429 });
+
+  assert.ok(error instanceof GeminiAnalysisError);
+  assert.ok(error instanceof Error);
+  assert.equal(error.name, "GeminiAnalysisError");
+  assert.equal(error.kind, "rate_limit");
+  assert.equal(error.status, 429);
 });

@@ -12,24 +12,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { fetchInhireJobs, INHIRE_MAX_CONCURRENT_TENANTS } = await import(
-  "../dist/providers/inhire.js"
-);
+const {
+  fetchInhireJobs,
+  INHIRE_MAX_CONCURRENT_TENANTS,
+  MIN_REQUEST_INTERVAL_MS,
+} = await import("../dist/providers/inhire.js");
 const { BoardTimeoutError } = await import("../dist/providers/board-http.js");
 const { BOARD_JOB_SOURCES } = await import("../dist/config/job-sources.js");
-
-/**
- * Cede o controle ao laço de eventos (um turno de macrotarefa), para drenar as
- * promessas pendentes nos testes de concorrência.
- */
-function flush() {
-  return new Promise((resolve) => setImmediate(resolve));
-}
 
 /** Drena o laço de eventos até `predicate()` virar verdadeiro (com limite). */
 async function flushUntil(predicate, maxTurns = 200) {
   for (let i = 0; i < maxTurns && !predicate(); i++) {
-    await flush();
+    // Espera um intervalo real curto: o teto agregado da InHire espaça as
+    // requisições por temporizadores (60 ms), que não disparam em meros turnos
+    // de setImmediate — seria preciso consumir tempo real.
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.ok(predicate(), "condição não satisfeita no tempo esperado");
 }
@@ -728,13 +725,28 @@ test("a concorrência entre empresas nunca excede o limite configurado", async (
       await flushUntil(() => gates.length === INHIRE_MAX_CONCURRENT_TENANTS);
       assert.equal(maxActive, INHIRE_MAX_CONCURRENT_TENANTS);
 
-      // Libera o restante para concluir todas as empresas.
-      while (gates.length > 0) {
-        gates.shift()();
-        await flush();
+      // Libera as listagens restantes conforme chegam, até todas concluírem.
+      // A espera consome tempo real para o teto agregado (60 ms) liberar as
+      // próximas empresas da fila.
+      const all = Promise.all(promises);
+      let done = false;
+      all.then(
+        () => {
+          done = true;
+        },
+        () => {
+          done = true;
+        },
+      );
+
+      while (!done) {
+        if (gates.length > 0) {
+          gates.shift()();
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
 
-      const results = await Promise.all(promises);
+      const results = await all;
       assert.equal(results.length, tenants.length);
       for (const result of results) {
         assert.deepEqual(result, []);
@@ -778,5 +790,161 @@ test("as fontes InHire configuradas apontam para o provider suportado", () => {
   for (const source of inhireSources) {
     assert.equal(typeof source.identifier, "string");
     assert.ok(source.identifier.trim().length > 0, "identificador vazio");
+  }
+});
+
+test("o teto agregado compartilhado espaça listagens e detalhes de empresas simultâneas", async () => {
+  // Cada empresa tem exatamente uma vaga: além da listagem, há o detalhe do
+  // índice 0 (que não recebe o pacing por empresa). Só o teto compartilhado
+  // separa as requisições, inclusive as listagens, que sem ele sairiam juntas.
+  const tenants = Array.from(
+    { length: INHIRE_MAX_CONCURRENT_TENANTS },
+    (_, index) => `t${index + 1}`,
+  );
+  const requestTimes = [];
+
+  await withFetch(
+    async (url) => {
+      requestTimes.push(Date.now());
+      if (url === LIST_URL) {
+        return response({ jobsPage: [summary("unica", "Vaga única")] });
+      }
+      return response({ displayName: "Vaga única", description: "x" });
+    },
+    async () => {
+      const results = await Promise.all(
+        tenants.map((tenant) => fetchInhireJobs(tenant)),
+      );
+      assert.equal(results.length, tenants.length);
+    },
+  );
+
+  // Quatro empresas × (1 listagem + 1 detalhe) = 8 requisições espaçadas.
+  assert.equal(requestTimes.length, tenants.length * 2);
+
+  const sorted = [...requestTimes].sort((a, b) => a - b);
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i] - sorted[i - 1];
+    assert.ok(
+      gap >= MIN_REQUEST_INTERVAL_MS - 15,
+      `intervalo agregado curto entre requisições: ${gap} ms`,
+    );
+  }
+});
+
+test("três timeouts consecutivos abandonam os detalhes preservando os coletados", async () => {
+  const detailRequests = [];
+
+  const jobs = await withFetch(
+    async (url) => {
+      if (url === LIST_URL) {
+        return response({
+          tenantName: "Acme",
+          jobsPage: [
+            summary("j1", "Primeira"),
+            summary("j2", "Segunda"),
+            summary("j3", "Terceira"),
+            summary("j4", "Quarta"),
+          ],
+        });
+      }
+      detailRequests.push(url);
+      if (url.endsWith("/j1")) {
+        return response({ displayName: "Primeira", description: "ok" });
+      }
+      throw timeoutError();
+    },
+    () => fetchInhireJobs("acme"),
+  );
+
+  // j1 é coletada; j2, j3 e j4 são timeouts consecutivos → abandona no terceiro,
+  // preservando a vaga já coletada e sem tocar em j5+.
+  assert.deepEqual(
+    jobs.map((job) => job.id),
+    ["j1"],
+  );
+  assert.equal(detailRequests.length, 4);
+});
+
+test("uma requisição bem-sucedida reinicia a contagem de timeouts", async () => {
+  const detailRequests = [];
+
+  const jobs = await withFetch(
+    async (url) => {
+      if (url === LIST_URL) {
+        return response({
+          tenantName: "Acme",
+          jobsPage: [
+            summary("j1", "Primeira"),
+            summary("j2", "Segunda"),
+            summary("j3", "Terceira"),
+            summary("j4", "Quarta"),
+            summary("j5", "Quinta"),
+          ],
+        });
+      }
+      detailRequests.push(url);
+      // j3 é bem-sucedida e reinicia o contador; j4 e j5 são novos timeouts.
+      if (url.endsWith("/j3")) {
+        return response({ displayName: "Terceira", description: "ok" });
+      }
+      throw timeoutError();
+    },
+    () => fetchInhireJobs("acme"),
+  );
+
+  // Sem o reset, o break ocorreria em j4 (3º timeout consecutivo); com o reset,
+  // toda a lista é percorrida e apenas a vaga bem-sucedida é coletada.
+  assert.deepEqual(
+    jobs.map((job) => job.id),
+    ["j3"],
+  );
+  assert.equal(detailRequests.length, 5);
+});
+
+test("empresa saudável com coleta acima de 45 s não é truncada", async () => {
+  // Sem orçamento fixo de tempo: a coleta inteira de uma empresa saudável deve
+  // ser preservada, mesmo quando o tempo acumulado ultrapassa os antigos 45 s.
+  // O relógio monotônico é simulado (avança a cada requisição) para não
+  // depender de espera real; o estado do teto compartilhado fica à frente das
+  // reservas, então nenhuma espera artificial é introduzida.
+  //
+  // Este teste avança o relógio monotônico muito à frente e é, por isso, o
+  // ÚLTIMO do arquivo: o estado compartilhado do teto (por módulo) não pode
+  // contaminar os demais testes com esperas artificiais.
+  const STEP_MS = 30_000;
+  const realNow = globalThis.performance.now.bind(globalThis.performance);
+  let fake = 0;
+  globalThis.performance.now = () => (fake += STEP_MS);
+
+  const detailRequests = [];
+
+  try {
+    const jobs = await withFetch(
+      async (url) => {
+        if (url === LIST_URL) {
+          return response({
+            tenantName: "Acme",
+            jobsPage: [
+              summary("j1", "Primeira"),
+              summary("j2", "Segunda"),
+              summary("j3", "Terceira"),
+            ],
+          });
+        }
+        detailRequests.push(url);
+        return response({ displayName: "Vaga", description: "ok" });
+      },
+      () => fetchInhireJobs("acme"),
+    );
+
+    // ~120 s simulados: com o antigo orçamento de 45 s, j3 seria descartada.
+    assert.deepEqual(
+      jobs.map((job) => job.id),
+      ["j1", "j2", "j3"],
+    );
+    assert.equal(detailRequests.length, 3);
+  } finally {
+    globalThis.performance.now = realNow;
   }
 });

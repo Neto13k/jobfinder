@@ -1,3 +1,6 @@
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { BOARD_JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
 import { BoardTimeoutError } from "./providers/board-http.js";
@@ -6,7 +9,11 @@ import { fetchInhireJobs } from "./providers/inhire.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
-import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
+import {
+  analyzeJob,
+  GeminiAnalysisError,
+  type JobAnalysis,
+} from "./services/ai-analyzer.js";
 import {
   getReusableAnalysis,
   markJobAsAnalyzed,
@@ -22,6 +29,7 @@ import {
 import {
   notifyWithReservation,
   type NotificationCandidate,
+  type NotificationKind,
 } from "./services/notification-dispatch.js";
 import { classifyNotification } from "./services/notification-policy.js";
 import {
@@ -79,7 +87,7 @@ const MAX_ANALYSES = parseMaxAnalyses(process.env.JOBFINDER_MAX_ANALYSES);
 const MAX_LOG_EXAMPLES = 5;
 
 /** Totais exibidos no resumo final da execução. */
-interface RunSummary {
+export interface RunSummary {
   analyzed: number;
   recovered: number;
   compatible: number;
@@ -87,9 +95,15 @@ interface RunSummary {
   review: number;
   sentCompatible: number;
   sentReview: number;
+  // Análises malsucedidas (cota, indisponibilidade, rede, autenticação ou
+  // resposta inválida); nunca registradas como análise válida.
+  failedAnalyses: number;
   // Vagas barradas pelo limite de análises, separadas por histórico consultado.
   unanalyzedByLimit: number;
   unscannedByLimit: number;
+  // Vagas sem análise porque a IA ficou indisponível nesta execução (falha
+  // global), diferenciadas do limite de tentativas e das falhas em si.
+  unanalyzedByGemini: number;
 }
 
 /** Motivo pelo qual uma vaga analisada não gerou notificação. */
@@ -274,13 +288,47 @@ async function fetchRotatedBatches(
 }
 
 /**
+ * Dependências do processamento, injetáveis nos testes.
+ *
+ * Permitem substituir a análise de IA e o despacho de notificação sem tocar no
+ * Gemini nem no Telegram reais, preservando o restante do fluxo (histórico,
+ * deduplicação e limiares) exatamente como em produção.
+ */
+export interface ProcessDependencies {
+  /** Analisa uma vaga; deve lançar GeminiAnalysisError em falha. */
+  analyze: (job: Job) => Promise<JobAnalysis>;
+  /** Reserva e envia a notificação; devolve false se já estava reservada. */
+  notify: (
+    candidate: NotificationCandidate,
+    kind: NotificationKind,
+  ) => Promise<boolean>;
+}
+
+/** Dependências reais usadas em produção. */
+const DEFAULT_DEPENDENCIES: ProcessDependencies = {
+  analyze: analyzeJob,
+  notify: (candidate, kind) => notifyWithReservation(candidate, kind),
+};
+
+/**
  * Processa as vagas na ordem recebida (prioridade geográfica).
  *
  * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (inclusive
  * as marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
  * notificação por execução, priorizando as vagas compatíveis.
+ *
+ * Quando a IA fica indisponível (falha global, não específica dos dados da
+ * vaga), novas chamadas ao Gemini são interrompidas pelo restante da execução,
+ * mas o laço continua: as análises já salvas seguem sendo reaproveitadas e as
+ * vagas pendentes serão reprocessadas numa próxima execução.
+ *
+ * @param jobs Vagas já filtradas e priorizadas.
+ * @param deps Dependências do processamento (padrão: implementações reais).
  */
-async function processJobs(jobs: Job[]): Promise<RunSummary> {
+export async function processJobs(
+  jobs: Job[],
+  deps: ProcessDependencies = DEFAULT_DEPENDENCIES,
+): Promise<RunSummary> {
   const summary: RunSummary = {
     analyzed: 0,
     recovered: 0,
@@ -289,8 +337,10 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
     review: 0,
     sentCompatible: 0,
     sentReview: 0,
+    failedAnalyses: 0,
     unanalyzedByLimit: 0,
     unscannedByLimit: 0,
+    unanalyzedByGemini: 0,
   };
 
   // Contagem por motivo de não notificação, para o resumo do funil.
@@ -321,9 +371,21 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
   // Vagas cuja iteração já começou; usado para medir o que sobra no break.
   let processed = 0;
 
+  // Chamadas ao Gemini já realizadas nesta execução. Diferente de
+  // `summary.analyzed` (que conta só os sucessos), este contador limita as
+  // TENTATIVAS: uma falha também consome o limite, impedindo chamadas
+  // repetidas quando a API está indisponível ou com cota esgotada.
+  let analysesUsed = 0;
+
+  // Estado que impede novas chamadas à IA nesta execução após uma falha global
+  // (cota, indisponibilidade, rede ou autenticação). Não interrompe o laço: as
+  // análises salvas continuam sendo reaproveitadas e as vagas pendentes ficam
+  // elegíveis para a próxima execução.
+  let geminiBlocked = false;
+
   for (const job of jobs) {
-    // Limite de análises atingido: só continua se ainda houver envio pendente.
-    if (summary.analyzed >= MAX_ANALYSES) {
+    // Limite de chamadas atingido: só continua se ainda houver envio pendente.
+    if (analysesUsed >= MAX_ANALYSES) {
       if (!SEND_NOTIFICATIONS || compatibleCandidate) {
         // As vagas restantes nem chegam a ter o histórico consultado.
         summary.unscannedByLimit = jobs.length - processed;
@@ -345,8 +407,15 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
     let origin: "nova" | "recuperada" = "recuperada";
 
     if (!analysis) {
+      // IA indisponível nesta execução: não faz novas chamadas. A vaga fica
+      // pendente e será reprocessada numa próxima execução.
+      if (geminiBlocked) {
+        summary.unanalyzedByGemini++;
+        continue;
+      }
+
       // Sem resultado salvo e limite atingido: não chama o Gemini.
-      if (summary.analyzed >= MAX_ANALYSES) {
+      if (analysesUsed >= MAX_ANALYSES) {
         // Histórico consultado, mas a vaga fica efetivamente sem análise.
         summary.unanalyzedByLimit++;
         continue;
@@ -354,7 +423,43 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
 
       origin = "nova";
       console.log(`Analisando: ${job.title} (${job.company})`);
-      analysis = await analyzeJob(job);
+
+      // Contabiliza a tentativa antes da chamada, mesmo se ela falhar.
+      analysesUsed++;
+
+      try {
+        analysis = await deps.analyze(job);
+      } catch (error) {
+        summary.failedAnalyses++;
+        const kind =
+          error instanceof GeminiAnalysisError ? error.kind : "unknown";
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `Falha na análise de ${job.title} (${job.company}) | ` +
+            `categoria: ${kind} | ${message}`,
+        );
+
+        // Falha específica dos dados da vaga (resposta vazia/estruturalmente
+        // inválida): isola apenas esta vaga e segue para a próxima.
+        if (kind === "invalid") {
+          continue;
+        }
+
+        // Cota, indisponibilidade, rede ou autenticação: impede novas chamadas
+        // ao Gemini nesta execução, sem interromper o laço. As análises salvas
+        // seguem sendo reaproveitadas e as vagas pendentes serão reprocessadas
+        // na próxima execução. Nenhuma falha é registrada como análise válida.
+        if (!geminiBlocked) {
+          geminiBlocked = true;
+          console.error(
+            "Novas análises interrompidas nesta execução (IA indisponível); " +
+              "as análises salvas continuam sendo reutilizadas e as vagas " +
+              "pendentes serão reprocessadas na próxima execução.",
+          );
+        }
+        continue;
+      }
+
       // Salva a nova análise imediatamente, inclusive as compatíveis.
       await markJobAsAnalyzed(job, analysis);
       summary.analyzed++;
@@ -421,7 +526,7 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
   // Uma notificação por execução: compatível antes de revisão manual.
   if (compatibleCandidate) {
     const { job } = compatibleCandidate;
-    if (await notifyWithReservation(compatibleCandidate, "compatible")) {
+    if (await deps.notify(compatibleCandidate, "compatible")) {
       summary.sentCompatible++;
       console.log(`Notificação enviada: ${job.title} (${job.company})`);
     } else {
@@ -434,7 +539,7 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
     }
   } else if (reviewCandidate) {
     const { job } = reviewCandidate;
-    if (await notifyWithReservation(reviewCandidate, "manual_review")) {
+    if (await deps.notify(reviewCandidate, "manual_review")) {
       summary.sentReview++;
       console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
     } else {
@@ -525,7 +630,9 @@ async function main() {
         `${summary.review} em revisão | ` +
         `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
         `${summary.sentReview} notificação(ões) de revisão | ` +
+        `${summary.failedAnalyses} análise(s) malsucedida(s) | ` +
         `${summary.unanalyzedByLimit} não analisada(s) por limite (histórico consultado) | ` +
+        `${summary.unanalyzedByGemini} não analisada(s) por indisponibilidade da IA | ` +
         `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
     );
   } catch (error) {
@@ -537,4 +644,28 @@ async function main() {
   }
 }
 
-main();
+/**
+ * Indica se este módulo é o ponto de entrada (`node dist/index.js`).
+ *
+ * A importação em testes não dispara o pipeline; apenas a execução direta roda
+ * `main`. A comparação normaliza caixa para tolerar a grafia da unidade no
+ * Windows.
+ */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  try {
+    return (
+      resolve(entry).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main();
+}
