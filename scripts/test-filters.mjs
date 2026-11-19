@@ -969,6 +969,105 @@ test("política de notificação classifica compatível, revisão e nulo", () =>
   );
 });
 
+test("TASK-08: matriz de notificação (localização × contratação)", () => {
+  const cases = [
+    ["allowed", "allowed", "compatible", "compatible"],
+    ["allowed", "allowed", "review", "manual_review"],
+    ["allowed", "unknown", "review", "manual_review"],
+    ["unknown", "allowed", "review", "manual_review"],
+    ["unknown", "unknown", "review", "manual_review"],
+    ["blocked", "allowed", "incompatible", null],
+    ["allowed", "blocked", "incompatible", null],
+    ["blocked", "unknown", "incompatible", null],
+    ["unknown", "blocked", "incompatible", null],
+  ];
+
+  for (const [locationStatus, contractStatus, decision, expected] of cases) {
+    assert.equal(
+      classifyNotification({
+        decision,
+        score: 50,
+        reason: "teste",
+        locationStatus,
+        contractStatus,
+      }),
+      expected,
+      `${locationStatus} × ${contractStatus} (${decision}) deveria ser ${expected}`,
+    );
+  }
+});
+
+test("TASK-08: vaga rejeitada pela IA nunca é notificada mesmo com critérios permitidos", () => {
+  // Incompatibilidade por senioridade/tecnologia: localização e contratação
+  // permitidas, mas a decisão é "incompatible".
+  assert.equal(
+    classifyNotification({
+      decision: "incompatible",
+      score: 15,
+      reason: "requer senioridade sênior",
+      locationStatus: "allowed",
+      contractStatus: "allowed",
+    }),
+    null,
+  );
+});
+
+test("TASK-08: informação indefinida nunca vira compatível", () => {
+  for (const [locationStatus, contractStatus] of [
+    ["allowed", "unknown"],
+    ["unknown", "allowed"],
+    ["unknown", "unknown"],
+  ]) {
+    assert.equal(
+      classifyNotification({
+        decision: "review",
+        score: 70,
+        reason: "informação indefinida",
+        locationStatus,
+        contractStatus,
+      }),
+      "manual_review",
+    );
+  }
+});
+
+test("TASK-08b: decisão review permanece manual_review mesmo com ambos os critérios allowed", () => {
+  assert.equal(
+    classifyNotification({
+      decision: "review",
+      score: 85,
+      reason: "requisitos a confirmar",
+      locationStatus: "allowed",
+      contractStatus: "allowed",
+    }),
+    "manual_review",
+  );
+});
+
+test("TASK-08b: compatible exige decisão compatible e ambos os critérios allowed", () => {
+  // Só a combinação exata (compatible + allowed + allowed) confirma a vaga.
+  assert.equal(
+    classifyNotification({
+      decision: "compatible",
+      score: 90,
+      reason: "ok",
+      locationStatus: "allowed",
+      contractStatus: "allowed",
+    }),
+    "compatible",
+  );
+  assert.equal(
+    classifyNotification({
+      decision: "review",
+      score: 90,
+      reason: "ok",
+      locationStatus: "allowed",
+      contractStatus: "allowed",
+    }),
+    "manual_review",
+  );
+});
+
 // --- Calibragem 4.0: priorização temporal ---------------------------------
 
 // Data de referência fixa para testes determinísticos.

@@ -42,8 +42,26 @@ function buildMessage(job: Job, analysis: JobAnalysis): string {
   ].join("\n");
 }
 
-// Monta a mensagem de revisão manual, deixando claro que a vaga não foi confirmada.
+// Monta a mensagem de revisão manual, deixando claro que a vaga não foi
+// confirmada e exatamente quais informações ainda precisam de verificação.
 function buildReviewMessage(job: Job, analysis: JobAnalysis): string {
+  // Critérios não confirmados (pode ficar vazio quando a revisão decorre de
+  // outros requisitos, ex.: senioridade ou tecnologias).
+  const pending: string[] = [];
+  if (analysis.locationStatus !== "allowed") {
+    pending.push("localização");
+  }
+  if (analysis.contractStatus !== "allowed") {
+    pending.push("modalidade de contratação");
+  }
+
+  // Sem pendências geográficas: orientar a verificação dos requisitos e do
+  // motivo da revisão, evitando uma linha com lista vazia.
+  const confirmation =
+    pending.length > 0
+      ? `Confirmar antes de se candidatar: ${pending.join(" e ")}.`
+      : "Confirmar antes de se candidatar: os requisitos da vaga e o motivo da revisão acima.";
+
   return [
     "⚠️ VAGA PARA REVISÃO MANUAL — NÃO CONFIRMADA",
     `Cargo: ${job.title}`,
@@ -51,11 +69,11 @@ function buildReviewMessage(job: Job, analysis: JobAnalysis): string {
     `Localização: ${job.location}`,
     `Pontuação da IA: ${analysis.score}`,
     `Motivo da revisão: ${analysis.reason}`,
+    `Status da localização: ${analysis.locationStatus}`,
     `Status da contratação: ${analysis.contractStatus}`,
     `Link: ${job.url}`,
     "",
-    "Verifique a modalidade de contratação e os requisitos antes de se candidatar. " +
-      "Esta vaga não está confirmada como CLT ou estágio.",
+    confirmation,
   ].join("\n");
 }
 
