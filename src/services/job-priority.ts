@@ -52,27 +52,114 @@ function normalize(text: string): string {
     .trim();
 }
 
+// Limites das categorias de recência, em milissegundos.
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+// Categorias temporais: menor valor = mais recente (maior prioridade).
+const RECENT_24H = 0;
+const RECENT_72H = 1;
+const RECENT_7D = 2;
+const RECENT_14D = 3;
+const OLDER = 4;
+const UNKNOWN_DATE = 5;
+
+/** Categoria temporal e instante de publicação (0 quando ausente ou inválido). */
+interface Recency {
+  rank: number;
+  timestamp: number;
+}
+
 /**
- * Ordena as vagas por prioridade geográfica, sem excluir nenhuma.
+ * Classifica a recência a partir de `publishedAt` e de um instante de
+ * referência.
  *
- * HIGH: remoto disponível para o Brasil ou presencial/híbrido em Maceió/AL.
- * MEDIUM: remoto LATAM/global ou de localização desconhecida/ambígua, ainda
- *         precisando de avaliação.
- * LOW: restrição explícita a região estrangeira, sem evidência de
- *      elegibilidade brasileira.
- *
- * A ordenação é estável: vagas de mesma prioridade mantêm a ordem original.
- * A heurística é conservadora — "remote: true" isolado ou a mera menção a
- * "Brazil"/"Brasil" na descrição não são tratados como elegibilidade.
+ * Datas ausentes, inválidas ou futuras nunca são tratadas como recém-publicadas:
+ * caem na categoria de recência desconhecida, preservando a vaga para análise.
  */
-export function prioritizeJobs(jobs: Job[]): Job[] {
+function classifyRecency(
+  publishedAt: string | undefined,
+  reference: number,
+): Recency {
+  if (!publishedAt) {
+    return { rank: UNKNOWN_DATE, timestamp: 0 };
+  }
+
+  const timestamp = Date.parse(publishedAt);
+  // Data inválida ou no futuro não é tratada como recém-publicada.
+  if (Number.isNaN(timestamp) || timestamp > reference) {
+    return { rank: UNKNOWN_DATE, timestamp: 0 };
+  }
+
+  const age = reference - timestamp;
+  if (age <= DAY_MS) return { rank: RECENT_24H, timestamp };
+  if (age <= 3 * DAY_MS) return { rank: RECENT_72H, timestamp };
+  if (age <= 7 * DAY_MS) return { rank: RECENT_7D, timestamp };
+  if (age <= 14 * DAY_MS) return { rank: RECENT_14D, timestamp };
+  return { rank: OLDER, timestamp };
+}
+
+/**
+ * Ordena as vagas por recência e, em seguida, por prioridade geográfica,
+ * sem excluir nenhuma.
+ *
+ * Chave de ordenação, da mais relevante para a menos:
+ * 1. Categoria temporal — recém-publicadas primeiro (≤24h, ≤72h, ≤7d, ≤14d,
+ *    >14d e, por último, data desconhecida ou inválida). A recência prevalece
+ *    sobre a geografia: uma vaga recente de localização indefinida supera uma
+ *    vaga elegível muito antiga.
+ * 2. Prioridade geográfica (HIGH, MEDIUM, LOW) — preservada dentro de cada
+ *    faixa temporal.
+ * 3. Data de publicação mais recente primeiro, dentro da mesma faixa e da
+ *    mesma prioridade geográfica.
+ *
+ * A ordenação é estável: empates mantêm a ordem original. As vagas sem data
+ * são preservadas e nenhuma é descartada pela idade. Os objetos originais não
+ * são modificados.
+ *
+ * @param jobs Vagas a ordenar (o array de entrada não é alterado).
+ * @param referenceDate Instante de referência para o cálculo da recência;
+ *   padrão `new Date()`. Útil para testes determinísticos.
+ */
+export function prioritizeJobs(
+  jobs: Job[],
+  referenceDate: Date = new Date(),
+): Job[] {
+  const reference = referenceDate.getTime();
+
   return jobs
-    .map((job, index) => ({ job, index, rank: priorityRank(job) }))
-    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((job, index) => {
+      const recency = classifyRecency(job.publishedAt, reference);
+      return {
+        job,
+        index,
+        temporal: recency.rank,
+        geographic: priorityRank(job),
+        timestamp: recency.timestamp,
+      };
+    })
+    .sort(
+      (a, b) =>
+        a.temporal - b.temporal ||
+        a.geographic - b.geographic ||
+        b.timestamp - a.timestamp ||
+        a.index - b.index,
+    )
     .map((entry) => entry.job);
 }
 
-/** Calcula a prioridade de uma vaga considerando localização e modalidade. */
+/**
+ * Calcula a prioridade geográfica de uma vaga (menor valor = maior prioridade).
+ *
+ * HIGH: remoto disponível para o Brasil ou presencial/híbrido em Maceió/AL.
+ * MEDIUM: remoto LATAM/global ou de localização desconhecida/ambígua, ainda
+ *   precisando de avaliação.
+ * LOW: restrição explícita a região estrangeira, sem evidência de elegibilidade
+ *   brasileira.
+ *
+ * A heurística é conservadora — "remote: true" isolado ou a mera menção a
+ * "Brazil"/"Brasil" na descrição não são tratados como elegibilidade.
+ */
 function priorityRank(job: Job): number {
   const location = normalize(job.location ?? "");
 

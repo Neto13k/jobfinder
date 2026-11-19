@@ -14,6 +14,7 @@ const { filterByLocation, classifyJobLocation } = await import(
 const { classifyNotification } = await import(
   "../dist/services/notification-policy.js"
 );
+const { prioritizeJobs } = await import("../dist/services/job-priority.js");
 
 /** Monta uma vaga mínima com os campos sobrepostos. */
 function job(overrides) {
@@ -363,6 +364,330 @@ test("triagem geográfica: nome de país estrangeiro em texto descritivo não bl
   );
 });
 
+test("triagem geográfica: remoto restrito à Colômbia é bloqueado", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: remoto restrito a Portugal é bloqueado", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Portugal",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: remoto restrito à União Europeia é bloqueado", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer (Remote)",
+        location: "Remote - European Union",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: remoto explicitamente disponível no Brasil é permitido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Brazil",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: remoto em cidade brasileira sem restrição é permitido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "São Paulo, SP",
+        remote: true,
+        description: "Vaga 100% remota.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: remoto LATAM e Worldwide são preservados", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - LATAM",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Worldwide",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: remoto sem informação geográfica permanece indefinido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: exclusão explícita do Brasil é bloqueada", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote",
+        remote: true,
+        description: "This position is not available in Brazil.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: presencial em Cuiabá é bloqueado", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior - Presencial",
+        location: "Cuiabá, Mato Grosso, Brazil",
+        remote: false,
+        description: "Vaga presencial em Cuiabá.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: presencial em Maceió é permitido", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior - Presencial",
+        location: "Maceió, Alagoas, Brazil",
+        remote: false,
+        description: "Vaga presencial em Maceió.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: modalidade contraditória permanece indefinida", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior Remoto",
+        location: "Brazil",
+        remote: true,
+        description: "Na prática é uma vaga presencial no escritório.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: região estrangeira com elegibilidade brasileira não é bloqueada", () => {
+  // A localização cita regiões estrangeiras, mas o Brasil também está elegível:
+  // não deve ser bloqueada.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - US / Canada / Brazil",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+
+  // Restrição que alterna entre região estrangeira e Brasil é ambígua: indefinida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote",
+        remote: true,
+        description: "Exclusive for residents of the European Union or Brazil.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: El Salvador não é confundido com Salvador/BA", () => {
+  // "El Salvador" (país) contém "Salvador" (cidade brasileira) como subcadeia:
+  // sem elegibilidade brasileira, deve ser bloqueado.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - El Salvador",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "blocked",
+  );
+
+  // Salvador/BA é uma localidade brasileira: permitido.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Salvador, Bahia",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("triagem geográfica: exigência estrangeira com alternativa no Brasil é indefinida", () => {
+  // A expressão geográfica completa admite o Brasil: não bloquear, mas também
+  // não confirmar (política conservadora).
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote",
+        remote: true,
+        description: "Must be based in Colombia or Brazil.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: menção a clientes/empresa global não comprova elegibilidade", () => {
+  // Localização estrangeira sem elegibilidade na própria localização: menções
+  // genéricas na descrição não liberam a vaga.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "Atendemos clientes brasileiros em todo o mundo.",
+      }),
+    ),
+    "blocked",
+  );
+
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "Somos uma empresa global com escritórios no Brasil.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("triagem geográfica: localização estrangeira com elegibilidade explícita ao Brasil fica indefinida", () => {
+  // A descrição declara, de forma explícita, que aceita candidatos residentes
+  // no Brasil: preservar a vaga para análise posterior (não bloquear).
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "Vaga remota aberta a residentes no Brasil.",
+      }),
+    ),
+    "unknown",
+  );
+
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer (Remote)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "Open to candidates based in Brazil.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("triagem geográfica: elegibilidade explícita não confunde menções genéricas nem restrição estrangeira", () => {
+  // Menção genérica (clientes) não é elegibilidade: permanece bloqueada.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - Colombia",
+        remote: true,
+        description: "Atendemos clientes brasileiros em todo o mundo.",
+      }),
+    ),
+    "blocked",
+  );
+
+  // Restrição de residência exclusivamente estrangeira segue bloqueada.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Remoto)",
+        location: "Remote - United States",
+        remote: true,
+        description: "Must be based in the United States.",
+      }),
+    ),
+    "blocked",
+  );
+});
+
 test("política de notificação classifica compatível, revisão e nulo", () => {
   assert.equal(
     classifyNotification({
@@ -394,4 +719,169 @@ test("política de notificação classifica compatível, revisão e nulo", () =>
     }),
     null,
   );
+});
+
+// --- Calibragem 4.0: priorização temporal ---------------------------------
+
+// Data de referência fixa para testes determinísticos.
+const REFERENCE = new Date("2026-11-18T12:00:00.000Z");
+
+/** ISO de N horas antes da data de referência. */
+function hoursBefore(hours) {
+  return new Date(REFERENCE.getTime() - hours * 60 * 60 * 1000).toISOString();
+}
+
+/** ISO de N dias antes da data de referência. */
+function daysBefore(days) {
+  return hoursBefore(days * 24);
+}
+
+/** Ids na ordem retornada. */
+function ids(jobs) {
+  return jobs.map((item) => item.id);
+}
+
+test("priorização temporal: vagas recentes passam à frente das antigas", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "antiga", publishedAt: daysBefore(30) }),
+      job({ id: "recente", publishedAt: hoursBefore(1) }),
+      job({ id: "media", publishedAt: daysBefore(2) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), ["recente", "media", "antiga"]);
+});
+
+test("priorização temporal: recência prevalece sobre elegibilidade geográfica", () => {
+  // Localização indefinida (MEDIUM) mas recém-publicada supera uma vaga
+  // elegível (HIGH) muito antiga.
+  const result = prioritizeJobs(
+    [
+      job({
+        id: "elegivel-antiga",
+        location: "Remoto - Brasil",
+        publishedAt: daysBefore(30),
+      }),
+      job({
+        id: "indefinida-recente",
+        location: "",
+        remote: true,
+        publishedAt: hoursBefore(1),
+      }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), ["indefinida-recente", "elegivel-antiga"]);
+});
+
+test("priorização temporal: prioridade geográfica é preservada na mesma faixa", () => {
+  // Todas na faixa ≤24h: a ordem geográfica decide primeiro e, dentro de cada
+  // prioridade, a vaga mais recente vem antes.
+  const result = prioritizeJobs(
+    [
+      job({ id: "latam-1h", location: "Remote - LATAM", publishedAt: hoursBefore(1) }),
+      job({ id: "elegivel-20h", location: "Remoto - Brasil", publishedAt: hoursBefore(20) }),
+      job({ id: "elegivel-2h", location: "Remoto - Brasil", publishedAt: hoursBefore(2) }),
+      job({ id: "restrita-3h", location: "US residents only", publishedAt: hoursBefore(3) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), [
+    "elegivel-2h",
+    "elegivel-20h",
+    "latam-1h",
+    "restrita-3h",
+  ]);
+});
+
+test("priorização temporal: limites das categorias temporais", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "d15", publishedAt: daysBefore(15) }),
+      job({ id: "h23", publishedAt: hoursBefore(23) }),
+      job({ id: "d8", publishedAt: daysBefore(8) }),
+      job({ id: "h25", publishedAt: hoursBefore(25) }),
+      job({ id: "d13", publishedAt: daysBefore(13) }),
+      job({ id: "h71", publishedAt: hoursBefore(71) }),
+      job({ id: "d6", publishedAt: daysBefore(6) }),
+      job({ id: "h73", publishedAt: hoursBefore(73) }),
+    ],
+    REFERENCE,
+  );
+  assert.deepEqual(ids(result), [
+    "h23", // ≤24h
+    "h25", // >24h ≤72h (mais recente primeiro)
+    "h71", // >24h ≤72h
+    "h73", // >72h ≤7d (mais recente primeiro)
+    "d6", // >72h ≤7d
+    "d8", // >7d ≤14d (mais recente primeiro)
+    "d13", // >7d ≤14d
+    "d15", // >14d
+  ]);
+});
+
+test("priorização temporal: datas ausentes, inválidas e futuras não são recentes", () => {
+  const future = new Date(REFERENCE.getTime() + 60 * 60 * 1000).toISOString();
+  const result = prioritizeJobs(
+    [
+      job({ id: "sem-data", publishedAt: undefined }),
+      job({ id: "invalida", publishedAt: "data-invalida" }),
+      job({ id: "futura", publishedAt: future }),
+      job({ id: "recente", publishedAt: hoursBefore(1) }),
+    ],
+    REFERENCE,
+  );
+  // Apenas a vaga recém-publicada é tratada como recente; as demais caem na
+  // categoria de recência desconhecida, preservadas na ordem original.
+  assert.deepEqual(ids(result), ["recente", "sem-data", "invalida", "futura"]);
+});
+
+test("priorização temporal: preserva vagas sem data e não exclui por idade", () => {
+  const result = prioritizeJobs(
+    [
+      job({ id: "muito-antiga", publishedAt: daysBefore(365) }),
+      job({ id: "sem-data" }),
+    ],
+    REFERENCE,
+  );
+  assert.equal(result.length, 2);
+  assert.deepEqual(ids(result).sort(), ["muito-antiga", "sem-data"]);
+});
+
+test("priorização temporal: estabilidade em empates", () => {
+  const same = hoursBefore(2);
+  const result = prioritizeJobs(
+    [
+      job({ id: "a", publishedAt: same }),
+      job({ id: "b", publishedAt: same }),
+      job({ id: "c" }),
+      job({ id: "d" }),
+    ],
+    REFERENCE,
+  );
+  // Empate temporal e geográfico mantém a ordem de entrada, inclusive entre as
+  // vagas sem data.
+  assert.deepEqual(ids(result), ["a", "b", "c", "d"]);
+});
+
+test("priorização temporal: não muta o array nem os objetos originais", () => {
+  const original = [
+    job({ id: "x", publishedAt: daysBefore(30) }),
+    job({ id: "y", publishedAt: hoursBefore(1) }),
+  ];
+  const snapshot = JSON.parse(JSON.stringify(original));
+
+  const result = prioritizeJobs(original, REFERENCE);
+
+  assert.notEqual(result, original); // devolve uma nova coleção
+  assert.deepEqual(original, snapshot); // array de entrada intacto
+  assert.equal(result.length, 2);
+  // Mesmas referências, apenas reordenadas: nenhuma vaga foi clonada ou mutada.
+  assert.ok(result.every((item) => original.includes(item)));
+});
+
+test("priorização temporal: funciona sem data de referência (padrão agora)", () => {
+  const result = prioritizeJobs([job({ id: "a" }), job({ id: "b" })]);
+  assert.equal(result.length, 2);
 });

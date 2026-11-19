@@ -1,10 +1,10 @@
 # JobFinder
 
-**Versão 2.0 — LinkedIn Jobs + Indeed Jobs**
+**Versão 2.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
 
-O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadros públicos de empresas e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, utiliza o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
+O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 boards públicos de empresas** (Greenhouse, Lever, Ashby e InHire) e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, usa o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`), mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
+> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
 
 ## Novidades da v2.0
 
@@ -14,6 +14,10 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 - **Coleta sequencial entre plataformas:** os lotes do LinkedIn e do Indeed rodam **um após o outro**, e cada lote executa **uma pesquisa por vez**, para não concorrerem na mesma sessão da biblioteca `ts-jobspy`.
 - **`patch-package` para `geoId`:** um patch local (`patches/ts-jobspy+3.0.1.patch`) habilita o parâmetro `geoId`, usado para fixar as pesquisas locais do LinkedIn em Maceió/AL.
 - **Mapeamento de falhas por plataforma:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente; falhas de um provider são isoladas e não derrubam as demais fontes.
+- **59 boards públicos de empresas:** coleta em quadros das plataformas **Greenhouse**, **Lever**, **Ashby** e **InHire** — 37 boards nas três primeiras e 22 empresas na InHire.
+- **Integração InHire:** listagem pública por empresa (cabeçalho `X-Tenant`) complementada por uma requisição de detalhe por vaga, com pacing por empresa, teto agregado de requisições, concorrência limitada a quatro empresas e política de timeouts consecutivos.
+- **Versionamento das análises:** cada análise é vinculada a uma versão centralizada de critérios; mudanças de regra disparam reanálise sem apagar o histórico anterior.
+- **Resiliência do pipeline:** falha global do Gemini, rate limiting (HTTP 429) e timeouts são tratados de forma isolada, preservando as vagas já coletadas e mantendo o fluxo.
 
 ### Recursos herdados da v1.1 (mantidos)
 
@@ -27,7 +31,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 
 ## Funcionalidades incluídas
 
-- Coleta de vagas nos job boards públicos **Greenhouse**, **Lever** e **Ashby**, por empresa configurada.
+- Coleta de vagas em **59 boards públicos** de empresas: **Greenhouse**, **Lever**, **Ashby** e **InHire**, por empresa configurada.
 - Coleta de vagas no **LinkedIn Jobs** e no **Indeed Jobs**, por termo de busca (júnior e estágio), com rotação de lotes por hora UTC.
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
@@ -45,7 +49,7 @@ O JobFinder **não** envia currículos, não se candidata a vagas e não confirm
 ## Tecnologias
 
 - Node.js, TypeScript e módulos ESM/NodeNext
-- APIs públicas de vagas da Greenhouse, Lever e Ashby
+- APIs públicas de vagas da Greenhouse, Lever, Ashby e InHire
 - **`ts-jobspy@3.0.1`** para a coleta de vagas do LinkedIn Jobs e do Indeed Jobs
 - **`patch-package`** para o suporte a `geoId` nas pesquisas locais do LinkedIn
 - Google Gemini (`@google/genai`)
@@ -114,6 +118,75 @@ As pesquisas do LinkedIn e do Indeed são configuradas em `src/config/linkedin-s
 - **Modalidade:** a modalidade é inferida dos sinais do próprio anúncio (título, localização e descrição), considerando termos em português, e não apenas o filtro de busca.
 - **Falhas isoladas:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente. Em `error`, a fonte falha isoladamente; em `partial`, as vagas já coletadas são preservadas e a interrupção é registrada. A falha de um provider não interrompe a execução.
 
+## Providers e boards públicos
+
+O JobFinder possui **seis providers**, em duas famílias: **boards públicos de empresa** (Greenhouse, Lever, Ashby e InHire) e **plataformas de busca por termo** (LinkedIn Jobs e Indeed Jobs). Todos usam o `fetch` nativo do Node.js.
+
+### Boards públicos de empresa
+
+| Provider | Endpoint público | Identificação da empresa |
+|---|---|---|
+| Greenhouse | `https://boards-api.greenhouse.io/v1/boards` | `identifier` do board |
+| Lever | `https://api.lever.co/v0/postings` | `identifier` do board |
+| Ashby | `https://api.ashbyhq.com/posting-api/job-board` | `identifier` do board |
+| InHire | `https://api.inhire.app/job-posts/public/pages` | cabeçalho `X-Tenant` |
+
+- **Requisições com timeout:** toda requisição a board público é limitada a **15 segundos** por requisição (conexão, cabeçalhos e leitura do corpo). O timeout é convertido em `BoardTimeoutError`, diferenciado nos logs, e não interrompe os demais providers.
+- **Validação de identidade:** um board só é adicionado depois de confirmar a identidade da empresa no endpoint/metadado oficial, evitando homônimos.
+- **Boards temporariamente vazios:** um board válido que esteja sem vagas publicadas é mantido (a fonte continua sendo consultada).
+
+### Integração InHire
+
+A API pública da InHire exige o cabeçalho **`X-Tenant`** em todas as requisições e expõe apenas uma **listagem rasa** por empresa. Como a listagem não traz descrição, data de publicação nem tipo de contratação, cada vaga publicada é complementada por uma **requisição de detalhe** (`/job-posts/public/pages/{jobId}`). Nenhuma informação ausente é inventada e a data da coleta nunca é usada como data de publicação.
+
+Para respeitar o limite da API sem perder cobertura:
+
+- **Pacing por empresa:** intervalo de **250 ms** entre requisições sequenciais de detalhe de uma mesma empresa.
+- **Teto agregado compartilhado:** intervalo mínimo de **60 ms** entre os **inícios efetivos** de *todas* as requisições InHire — listagens **e** detalhes, de todas as empresas (≈ 16 req/s, abaixo do limite de 20 req/s documentado pela InHire). O intervalo é medido por **relógio monotônico**; a espera pela resposta HTTP **não** é serializada.
+- **Concorrência limitada:** no máximo **4 empresas** coletadas simultaneamente.
+- **Timeouts consecutivos:** os detalhes de uma empresa são abandonados somente após **3 timeouts consecutivos**; uma requisição bem-sucedida **reinicia** o contador. Não há limite de quantidade de vagas nem de tempo fixo por empresa, portanto empresas lentas porém saudáveis não são truncadas.
+- **Rate limiting imediato:** ao receber **HTTP 429** em um detalhe, os detalhes restantes daquela empresa são ignorados, preservando as vagas já coletadas.
+- **Isolamento por vaga:** falha de um detalhe (ou da normalização) descarta apenas a vaga afetada, sem interromper a coleta das demais empresas.
+
+## Filtros, priorização e triagem
+
+A ordem do funil é: **deduplicação → cargo → senioridade → localização → priorização**.
+
+- **Deduplicação:** chave única `source:id`; a mesma vaga vinda de fontes distintas é mantida como registros separados.
+- **Cargo (desenvolvimento):** mantém títulos de desenvolvimento de software (ex.: *developer*, *frontend*, *backend*, *full stack*, *desenvolvedor*, *engenheiro de software*) e **descarta** áreas não técnicas (vendas, marketing, RH/recrutamento) com precedência sobre qualquer termo de tecnologia.
+- **Senioridade:** remove títulos com senioridade alta por **palavra inteira** (`sênior`, `pleno`, `lead`, `staff`, `principal`, `especialista`/`specialist`, `mid-level`), preservando júnior, estágio, trainee e vagas sem senioridade informada.
+- **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Vagas **indefinidas** são preservadas para a IA avaliar. `remote: true` **não** significa disponibilidade no Brasil; a modalidade é inferida do próprio anúncio, considerando negações e contradições.
+- **Priorização (temporal + geográfica):** ordena sem descartar. 1) **categoria temporal** (≤24h, ≤72h, ≤7d, ≤14d, >14d e, por último, data desconhecida/inválida); 2) **prioridade geográfica** (`HIGH` Maceió ou remoto no Brasil; `MEDIUM` remoto LATAM/global ou localização ambígua; `LOW` restrições/exclusão do Brasil); 3) data de publicação mais recente; 4) ordem original (ordenação estável). Datas ausentes, inválidas ou futuras são tratadas como recência desconhecida.
+
+> Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A análise de IA em `src/services/ai-analyzer.ts` aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL, e contratação CLT ou estágio; informação ausente retorna `unknown` e **nunca** é presumida.
+
+## Tratamento de HTTP 429 (rate limiting)
+
+A coleta do **LinkedIn** e do **Indeed** (via `ts-jobspy@3.0.1`) pode responder **HTTP 429**. O tratamento:
+
+- O rate limiting é detectado prioritariamente pelo sinal estruturado (`RateLimitException`) e, como fallback restrito, pelo **literal `HTTP 429`** na mensagem agregada (`ScrapeInterrupted`). Um "429" isolado, sem o prefixo HTTP, é ignorado para evitar falso positivo.
+- Ao detectar 429, as **pesquisas restantes daquele provider são interrompidas**, preservando as vagas já coletadas — inclusive as devolvidas pelo próprio retorno parcial. Os demais providers **continuam** normalmente.
+- **Não há retries adicionais** para 429: a interrupção é propagada e o tratamento permanece determinístico.
+- O helper `withRateLimitGuard` converte rejeições diretas de `scrapeJobs` em `RateLimitError`, cobrindo o caso em que a promessa rejeita antes de retornar resultados.
+
+## Versionamento das análises
+
+Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION`, em `src/services/ai-analyzer.ts`).
+
+- **Reutilização estrita:** uma análise salva só é reaproveitada quando a `criteriaVersion` for **idêntica** à versão vigente. Análises de versões anteriores — inclusive registros legados, sem versão — são **reanalisadas**.
+- **Histórico cumulativo:** ao reanalisar, a nova análise é **acrescentada**; nenhum resultado anterior é apagado ou alterado. No PostgreSQL, a unicidade é `UNIQUE NULLS NOT DISTINCT (key, criteria_version)` (uma linha por vaga e versão, no máximo uma legada), e a chave primária passa a ser um `id` substituto.
+- **Notificadas não são reanalisadas:** uma vaga já notificada (ou reservada) **não** consome cota do Gemini, mesmo após mudança de versão de critérios.
+- **Incrementar a versão** sempre que as regras do prompt ou o schema da resposta mudarem, para disparar a reanálise.
+
+## Resiliência do pipeline
+
+- **Falhas de provider são isoladas:** cada fonte é coletada individualmente; a falha de uma não derruba as demais.
+- **Falhas do Gemini são categorizadas** (`classifyGeminiError`): `rate_limit`, `unavailable`, `timeout`, `auth`, `invalid` e `unknown`. Respostas vazias ou estruturalmente inválidas isolam apenas a vaga afetada; falhas **globais** (cota, indisponibilidade, rede, autenticação) interrompem **novas chamadas** à IA pelo resto da execução **sem parar o laço**: as análises já salvas continuam sendo reaproveitadas e as vagas pendentes ficam elegíveis para a próxima execução.
+- **Nenhuma falha vira análise válida:** uma análise malsucedida **não** é persistida nem notificada.
+- **Limite por tentativas:** `JOBFINDER_MAX_ANALYSES` limita **tentativas** (não apenas sucessos), impedindo repetição quando a API está indisponível ou com cota esgotada.
+- **Contadores distintos no resumo:** `failedAnalyses` (falhas), `unanalyzedByLimit` (barradas pelo limite, com histórico consultado), `unanalyzedByGemini` (sem análise por indisponibilidade da IA) e `unscannedByLimit` (nem percorridas pelo limite).
+- **Encerramento explícito:** falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução com código de saída diferente de zero; falhas individuais de provider são registradas e isoladas.
+
 ## Persistência: JSON ou PostgreSQL
 
 O backend é escolhido por `JOBFINDER_STORAGE`:
@@ -148,6 +221,7 @@ As migrations ficam em `supabase/migrations/`:
 1. `20261112000000_create_job_history_tables.sql` — cria `analyzed_jobs` e `notified_jobs` com RLS habilitado.
 2. `20261113000000_add_notified_jobs_status.sql` — adiciona a coluna `status` (`pending`/`sent`) em `notified_jobs`.
 3. `20261114000000_add_notified_jobs_reservation_owner.sql` — adiciona `reserved_by` e `reserved_at` (propriedade da reserva) em `notified_jobs`.
+4. `20261115000000_add_analyzed_jobs_criteria_version.sql` — adiciona `criteria_version` em `analyzed_jobs`, troca a chave primária por um `id` substituto e cria a unicidade de negócio `UNIQUE NULLS NOT DISTINCT (key, criteria_version)`, preservando o histórico por versão de critérios.
 
 Aplique-as pelo painel/SQL Editor do Supabase ou pelo Supabase CLI:
 
@@ -155,7 +229,7 @@ Aplique-as pelo painel/SQL Editor do Supabase ou pelo Supabase CLI:
 supabase db push
 ```
 
-Todas as migrations são aditivas (`add column if not exists`); podem ser aplicadas com segurança sobre o banco já existente.
+Todas as migrations são aditivas (`add column if not exists`) e idempotentes; podem ser aplicadas com segurança sobre o banco já existente. A migration de `criteria_version` exige PostgreSQL 15+ (Supabase 17) por usar `unique nulls not distinct` e `generated always as identity`.
 
 ## Migração dos históricos locais
 
@@ -286,7 +360,7 @@ Para ativar o agendamento, defina `JOBFINDER_AUTOMATION_ENABLED=true`. Para ativ
 ## Fluxo de processamento
 
 ```text
-Fontes (Greenhouse, Lever, Ashby, LinkedIn Jobs, Indeed Jobs)
+Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
                   |
                   v
    Coleta: boards em paralelo + lotes rotativos em sequência
@@ -335,15 +409,20 @@ Fontes (Greenhouse, Lever, Ashby, LinkedIn Jobs, Indeed Jobs)
 
 ## Fontes configuradas
 
-As empresas/boards utilizados são definidos em `src/config/job-sources.ts`, e as pesquisas do LinkedIn e do Indeed em arquivos próprios. A configuração inicial testada no desenvolvimento contém:
+As empresas/boards utilizados são definidos em `src/config/job-sources.ts`, e as pesquisas do LinkedIn e do Indeed em arquivos próprios. A configuração atual reúne **59 boards públicos de empresas**, distribuídos entre os quatro providers de board, além das pesquisas por termo:
 
-| Plataforma | Referência de exemplo |
-|---|---|
-| Greenhouse | `stripe` |
-| Lever | `Flex` |
-| Ashby | `Ashby` |
-| LinkedIn Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) |
-| Indeed Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) |
+| Provider | Boards configurados | Referência de exemplo |
+|---|---|---|
+| Greenhouse | 24 | `ifoodcarreiras`, `xpinc`, `c6bank`, `stone` |
+| InHire | 22 | `celcoin`, `contabilizei`, `olist`, `cielo` |
+| Ashby | 9 | `nubank`, `deel`, `truelogic` |
+| Lever | 4 | `Flex`, `ciandt`, `oowlish` |
+| LinkedIn Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) | — |
+| Indeed Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) | — |
+
+**Total: 59 boards públicos** (37 em Greenhouse/Lever/Ashby + 22 empresas na InHire) **e 200 pesquisas** (100 do LinkedIn + 100 do Indeed).
+
+Cada identificador de board foi confirmado contra o endpoint público do respectivo provider (resposta HTTP 200 com corpo válido) e a identidade da empresa foi conferida no metadado/portal oficial antes de ser adicionada. Boards que responderam erro HTTP, apontaram para empresa sem evidência de contratação no Brasil ou cuja identidade não pôde ser confirmada ficaram de fora. Alguns boards válidos podem estar **temporariamente sem vagas publicadas** e mesmo assim permanecem configurados.
 
 Essas fontes foram usadas para validar os providers e **não garantem oportunidades compatíveis com candidatos residentes no Brasil**. Adicionar uma nova empresa à lista exige confirmar previamente o identificador aceito pela respectiva API. A cobertura completa das pesquisas do LinkedIn e do Indeed ocorre ao longo do ciclo de 20 lotes; cada execução roda apenas 5 pesquisas de cada plataforma.
 
@@ -360,14 +439,27 @@ npm test
 JOBFINDER_RUN_DB_TESTS=true npm run test:db
 ```
 
-`npm test` cobre: filtros de cargo/senioridade/localização, política de notificação, persistência JSON com reserva e propriedade (`reserved_by`), e o despacho de notificações (falha na confirmação após envio aceito, envio confirmadamente não entregue, resultado incerto sem reenvio, e recuperação de reserva pendente).
+`npm test` executa, em sequência, dez suítes locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
+
+| Script | Cobre |
+|---|---|
+| `test-filters.mjs` | filtros de cargo, senioridade e localização |
+| `test-ai-analyzer.mjs` | captura de dados, prompt e schema de resposta |
+| `test-analysis-versioning.mjs` | reutilização estrita por `criteria_version` e histórico cumulativo |
+| `test-storage.mjs` | persistência JSON, reserva e propriedade (`reserved_by`), deduplicação |
+| `test-dispatch.mjs` | desfechos do despacho (confirmação, não entregue, resultado incerto, recuperação pendente) |
+| `test-rate-limit.mjs` | detecção estruturada/textual de HTTP 429 e interrupção preservando vagas |
+| `test-board-timeout.mjs` | timeout de boards públicos (`BoardTimeoutError`) |
+| `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
+| `test-job-sources.mjs` | integridade da configuração de fontes/boards |
+| `test-process-jobs.mjs` | resiliência do `processJobs` (falha global do Gemini, reuso de análises, limite por tentativas, ausência de persistência/envio em falhas) |
 
 Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL` e `JOBFINDER_RUN_DB_TESTS=true` e só rodam quando você autoriza explicitamente. Eles usam o prefixo `db-test:` e removem suas linhas ao final; sem as variáveis, apenas informam e não tocam no Supabase.
 
 **Resultados das validações realizadas:**
 
 - **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
-- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, persistência JSON com reserva e propriedade, e os desfechos do despacho de notificações.
+- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire e resiliência do pipeline.
 - **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
 - **Validação do provider:** `scripts/validate-linkedin.mjs` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção manual da coleta.
 
@@ -389,29 +481,32 @@ jobfinder/
 │   │   └── indeed-searches.ts         # 100 pesquisas do Indeed Jobs
 │   ├── db/postgres.ts                 # Pool PostgreSQL com TLS validado
 │   ├── providers/
+│   │   ├── board-http.ts              # Requisições a boards com timeout (BoardTimeoutError)
 │   │   ├── greenhouse.ts
 │   │   ├── lever.ts
 │   │   ├── ashby.ts
+│   │   ├── inhire.ts                  # Listagem + detalhe, pacing/teto agregado e timeouts
 │   │   ├── linkedin.ts                # LinkedIn Jobs via ts-jobspy
 │   │   └── indeed.ts                  # Indeed Jobs via ts-jobspy
 │   ├── services/
-│   │   ├── ai-analyzer.ts
+│   │   ├── ai-analyzer.ts             # Análise via Gemini e versão dos critérios
 │   │   ├── analysis-history.ts        # Histórico de análises (JSON ou PostgreSQL)
 │   │   ├── deduplication.ts           # Chave, reserva e histórico de notificações
 │   │   ├── storage.ts                 # Seleção do backend de persistência
+│   │   ├── rate-limit.ts              # Detecção de HTTP 429 e interrupção parcial
 │   │   ├── job-filter.ts
 │   │   ├── seniority-filter.ts
 │   │   ├── location-filter.ts
-│   │   ├── job-priority.ts
+│   │   ├── job-priority.ts            # Priorização temporal e geográfica
 │   │   ├── linkedin-search-rotation.ts # Rotação dos 20 lotes do LinkedIn
 │   │   ├── indeed-search-rotation.ts   # Rotação dos 20 lotes do Indeed
 │   │   ├── notification-policy.ts
 │   │   ├── notification-dispatch.ts   # Reserva + envio + confirmação/liberação
 │   │   └── telegram.ts
 │   ├── types/job.ts
-│   └── index.ts
+│   └── index.ts                       # Pipeline (processJobs, geminiBlocked)
 ├── supabase/migrations/               # Migrations SQL
-├── scripts/                           # Testes e utilitários manuais
+├── scripts/                           # Testes e utilitários manuais (test-*.mjs, smoke-test.mjs, ...)
 ├── data/                              # Históricos JSON locais (não versionar)
 ├── .env.example                       # Referência de configuração, sem segredos
 ├── package.json
@@ -439,7 +534,8 @@ jobfinder/
 - **Dependência de scraping:** a coleta das vagas do LinkedIn e do Indeed depende da `ts-jobspy@3.0.1` e do patch local (`geoId`); mudanças nas plataformas ou atualizações da biblioteca podem exigir ajustes. A versão fica fixada exatamente para preservar a compatibilidade do patch.
 - **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas; `remote: true` não significa disponibilidade no Brasil.
 - **Uma mensagem por execução:** oportunidades aprovadas adicionais ficam pendentes para execuções seguintes.
-- **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever, Ashby, LinkedIn Jobs ou Indeed Jobs) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
+- **Risco residual de tempo de execução:** o workflow do GitHub Actions tem `timeout-minutes: 10`, mas **não há garantia de duração máxima do pipeline**. Em cenários de alta latência ou volume elevado — sobretudo na InHire, em que cada vaga exige uma requisição de detalhe adicional — a execução pode se aproximar ou ultrapassar esse teto e ser interrompida pelo próprio Actions. As vagas já coletadas e as análises já persistidas são preservadas, e o restante fica para a próxima execução; contudo, a interrupção externa pode ocorrer sem que o pipeline finalize e registre um resumo.
+- **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs ou Indeed Jobs) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
 
 ## Roadmap
 
@@ -470,4 +566,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v2.0 implementada e validada em build e testes automatizados (LinkedIn Jobs + Indeed Jobs). A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos**. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.

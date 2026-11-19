@@ -1,4 +1,8 @@
 import type { Job } from "../types/job.js";
+import { fetchBoardWithTimeout } from "./board-http.js";
+
+/** Origem das vagas. */
+const SOURCE = "lever";
 
 interface LeverPosting {
   id: string;
@@ -16,26 +20,40 @@ interface LeverPosting {
 
 const LEVER_API_URL = "https://api.lever.co/v0/postings";
 
+/**
+ * Busca as vagas de um board público da Lever e as normaliza para {@link Job}.
+ *
+ * A requisição é limitada ao timeout dos boards públicos (ver
+ * {@link fetchBoardWithTimeout}).
+ *
+ * @param siteName Identificador do board (site) na Lever.
+ * @throws {BoardTimeoutError} Se a requisição exceder o timeout.
+ * @throws {Error} Se a resposta HTTP for de erro ou o corpo for inválido.
+ */
 export async function fetchLeverJobs(siteName: string): Promise<Job[]> {
   if (!siteName.trim()) {
     throw new Error("Lever site name is required.");
   }
 
-  const response = await fetch(
+  const postings = await fetchBoardWithTimeout(
     `${LEVER_API_URL}/${encodeURIComponent(siteName)}?mode=json`,
+    SOURCE,
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Lever API request failed with status ${response.status} ${response.statusText}.`,
+        );
+      }
+
+      const body: unknown = await response.json();
+
+      if (!Array.isArray(body)) {
+        throw new Error("Lever API returned an invalid response.");
+      }
+
+      return body;
+    },
   );
-
-  if (!response.ok) {
-    throw new Error(
-      `Lever API request failed with status ${response.status} ${response.statusText}.`,
-    );
-  }
-
-  const postings: unknown = await response.json();
-
-  if (!Array.isArray(postings)) {
-    throw new Error("Lever API returned an invalid response.");
-  }
 
   return postings.map((posting) => toJob(posting, siteName));
 }
@@ -61,7 +79,7 @@ function toJob(posting: unknown, siteName: string): Job {
       location.toLowerCase().includes("remote"),
     description: posting.descriptionPlain ?? posting.description ?? "",
     url: posting.hostedUrl ?? posting.applyUrl ?? "",
-    source: "lever",
+    source: SOURCE,
     publishedAt,
   };
 }

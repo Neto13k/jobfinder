@@ -26,17 +26,127 @@ const NEGATION_AFTER = /^[^.;!?]{0,15}\b(?:not|nao|indisponivel|unavailable)\b/;
 // Cidade aceita para vagas presenciais e híbridas.
 const TARGET_CITY = /\bmaceio\b/;
 
-// Regiões que incluem explicitamente o Brasil.
-const ELIGIBLE_REGION =
-  /\b(brazil|brasil|latam|latin america|america latina|worldwide|global|anywhere)\b/;
+// Regiões que incluem explicitamente o Brasil. Fonte única da expressão,
+// reutilizada ao avaliar alternativas geográficas em exigências de residência.
+const ELIGIBLE_AREA =
+  "brazil|brasil|latam|latin america|america latina|worldwide|global|anywhere";
 
-// Localidades claramente fora da área aceita (presencial ou de residência).
-const FOREIGN_LOCATION =
-  /\b(us|usa|united states|estados unidos|eua|canada|uk|united kingdom|reino unido|europe|emea|apac|london|londres|india|germany|ireland)\b/;
+const ELIGIBLE_REGION = new RegExp(`\\b(?:${ELIGIBLE_AREA})\\b`);
+
+// Localidades claramente estrangeiras: países, regiões e cidades frequentes nos
+// anúncios. A mera menção na descrição NÃO bloqueia; estes termos só pesam na
+// localização da vaga ou em exigências explícitas de residência.
+const FOREIGN_AREA = [
+  // América do Norte
+  "us", "usa", "united states", "estados unidos", "eua", "canada", "mexico",
+  "mexico city", "cidade do mexico", "california", "new york", "nova york",
+  "san francisco", "seattle", "boston", "chicago", "austin", "dallas",
+  "atlanta", "los angeles", "miami", "toronto", "vancouver", "montreal",
+  // Reino Unido, Irlanda e Europa
+  "uk", "united kingdom", "reino unido", "england", "scotland", "wales",
+  "ireland", "irlanda", "london", "londres", "dublin", "europe",
+  "european union", "uniao europeia", "european economic area", "eea",
+  "emea", "germany", "alemania", "france", "franca", "italy", "italia",
+  "netherlands", "holanda", "paises baixos", "belgium", "belgica",
+  "switzerland", "suica", "austria", "poland", "polonia", "romania",
+  "romenia", "ukraine", "ucrania", "hungary", "czech", "greece", "grecia",
+  "sweden", "suecia", "norway", "noruega", "denmark", "dinamarca",
+  "finland", "finlandia", "portugal", "spain", "espana", "lisbon", "lisboa",
+  "madrid", "barcelona", "berlin", "munich", "amsterdam", "paris",
+  // Ásia, Oceania e Oriente Médio
+  "apac", "india", "indonesia", "philippines", "filipinas", "pakistan",
+  "bangladesh", "vietnam", "china", "japan", "japao", "singapore",
+  "singapura", "australia", "new zealand", "dubai", "uae",
+  "emirados arabes unidos", "israel", "hong kong", "korea", "bangalore",
+  "bengaluru", "hyderabad", "tokyo", "shanghai", "beijing", "sydney",
+  "melbourne",
+  // África
+  "egypt", "nigeria", "kenya", "south africa", "africa do sul",
+  // América Latina (fora do Brasil)
+  "colombia", "argentina", "chile", "peru", "venezuela", "equador",
+  "ecuador", "bolivia", "paraguay", "paraguai", "uruguay", "uruguai",
+  "costa rica", "panama", "guatemala", "honduras", "el salvador",
+  "nicaragua", "cuba", "republica dominicana", "puerto rico", "bogota",
+  "medellin", "cali", "lima", "santiago", "buenos aires", "montevideu",
+  "montevideo",
+].join("|");
+
+// Localidade estrangeira isolada (usada na localização e em exigências).
+const FOREIGN_LOCATION = new RegExp(`\\b(?:${FOREIGN_AREA})\\b`);
 
 // Exclusão explícita de candidatos residentes em outro país (incompatível).
-const FOREIGN_ONLY =
-  /\b(?:us|usa|united states|estados unidos|eua|canada|uk|united kingdom|reino unido)\s+(?:residents?|citizens?|residentes?|cidadaos?)\s+(?:only|apenas)\b|\b(?:must\s+be\s+|required\s+to\s+be\s+)(?:based|located)\s+in\s+(?:the\s+)?(?:us|usa|united states|estados unidos|eua|canada|uk|united kingdom|reino unido)\b/;
+//
+// A expressão geográfica é avaliada por completo: se a mesma oração também
+// admitir Brasil/LATAM/global (ex.: "must be based in Colombia or Brazil"), a
+// exigência é ambígua e NÃO é decidida aqui — fica para
+// `evaluateResidenceRestriction`, que trata alternativas como indefinidas.
+const FOREIGN_ONLY = new RegExp(
+  "(?:" +
+    `\\b(?:${FOREIGN_AREA})\\s+(?:residents?|citizens?|residentes?|cidadaos?)\\s+(?:only|apenas)\\b` +
+    `|\\b(?:must\\s+be\\s+|required\\s+to\\s+be\\s+)(?:based|located)\\s+in\\s+(?:the\\s+)?(?:${FOREIGN_AREA})\\b` +
+    ")" +
+    `(?![^.;!?]*\\b(?:${ELIGIBLE_AREA})\\b)`,
+);
+
+// Exclusão explícita de candidatos residentes no Brasil (incompatível).
+const BRAZIL_EXCLUSION =
+  /\b(?:excluding|except|without)\s+(?:the\s+)?(?:brazil|brasil)\b|\b(?:brazil|brasil)\s+(?:excluded|not\s+available|not\s+eligible)\b|\bnot\s+available\s+in\s+(?:the\s+)?(?:brazil|brasil)\b|\b(?:exceto|excluindo|sem)\s+(?:o\s+)?(?:brasil|brazil)\b|\b(?:brasil|brazil)\s+(?:excluido|excluida|indisponivel)\b|\bnao\s+disponivel\s+(?:no|em|para)?\s*(?:o\s+)?(?:brasil|brazil)\b/;
+
+// Estados e principais cidades brasileiras: reconhecem vagas remotas no Brasil
+// mesmo sem as palavras "Brazil"/"Brasil" na localização. Não inclui siglas de
+// UF (ambíguas com estados dos EUA) para evitar falso positivo.
+const BRAZIL_PLACE = new RegExp(
+  "\\b(?:" +
+    [
+      // Estados (nomes completos)
+      "acre", "alagoas", "amapa", "amazonas", "bahia", "ceara",
+      "distrito federal", "espirito santo", "goias", "maranhao",
+      "mato grosso do sul", "mato grosso", "minas gerais", "paraiba",
+      "parana", "pernambuco", "piaui", "rio de janeiro",
+      "rio grande do norte", "rio grande do sul", "rondonia", "roraima",
+      "santa catarina", "sao paulo", "sergipe", "tocantins",
+      // Principais cidades
+      "brasilia", "salvador", "fortaleza", "belo horizonte", "manaus",
+      "curitiba", "recife", "goiania", "belem", "porto alegre",
+      "guarulhos", "campinas", "sao luis", "maceio", "campo grande",
+      "natal", "teresina", "joao pessoa", "santo andre", "osasco",
+      "sao jose dos campos", "ribeirao preto", "uberlandia", "sorocaba",
+      "aracaju", "cuiaba", "joinville", "juiz de fora", "londrina",
+      "niteroi", "florianopolis", "porto velho", "macapa",
+      "caxias do sul", "vitoria", "feira de santana",
+      "sao bernardo do campo", "nova iguacu", "contagem",
+      "aparecida de goiania",
+    ].join("|") +
+    ")\\b",
+);
+
+// Termos estrangeiros que "escondem" uma localidade brasileira como subcadeia
+// (ex.: "El Salvador" contém "Salvador"): removidos antes de reconhecer
+// cidades/estados brasileiros, para evitar colisão de classificação.
+const FOREIGN_SHADOWING_BRAZIL = /\b(?:el|san)\s+salvador\b/g;
+
+// Evidência EXPLÍCITA de elegibilidade a candidatos residentes no Brasil,
+// usada apenas na descrição. Reconhece construções que ligam candidatos ou
+// residentes (ou verbos de aceitação/residência) ao Brasil; NÃO conta meras
+// menções genéricas (clientes, escritórios, empresa global).
+const BRAZIL_ELIGIBILITY = new RegExp(
+  [
+    // "candidatos/residentes no Brasil", "candidates based in Brazil"
+    "\\b(?:residents?|candidates?|applicants?|people|professionals?|developers?" +
+      "|employees?|residentes?|candidat[oa]s?|pessoas|profissionais?" +
+      "|desenvolvedor(?:es)?|colaboradores?)\\b[^.;!?]{0,30}" +
+      "\\b(?:in|of|from|no|na|em|do|da)\\s+(?:the\\s+)?(?:brazil|brasil)\\b",
+    // "aberta a residentes no Brasil", "open to ... Brazil", "hiring in Brazil"
+    "\\b(?:open|available|accepting|accept|hiring|hire|considering|eligible" +
+      "|abert[oa]s?|disponi(?:vel|veis)|aceitamos|aceita|contratamos|contrata" +
+      "|consideramos|elegi(?:vel|veis)|buscamos|procuramos)\\b[^.;!?]{0,40}" +
+      "\\b(?:brazil|brasil)\\b",
+    // "must reside in Brazil", "residir no Brasil"
+    "\\b(?:must\\s+be\\s+based|must\\s+reside|must\\s+live|reside|residing" +
+      "|residir|resida|morar|mora|domiciliad[oa])\\b[^.;!?]{0,20}" +
+      "\\b(?:in|no|na|em|do|da)\\s+(?:the\\s+)?(?:brazil|brasil)\\b",
+  ].join("|"),
+);
 
 // Exigência explícita de residência, capturando o local exigido.
 // A captura vai até a próxima pontuação e abrange alternativas ligadas por
@@ -242,24 +352,40 @@ function evaluateResidenceRestriction(
 /**
  * Classifica a localização de uma vaga.
  *
- * allowed: presencial/híbrido em Maceió/AL ou remoto elegível a residentes no Brasil.
- * blocked: presencial/híbrido explícito fora de Maceió ou restrição explícita
- *          a residentes de outro país.
+ * allowed: presencial/híbrido em Maceió/AL ou remoto elegível a residentes no
+ *          Brasil (país, região LATAM/global ou cidade/estado brasileiro).
+ * blocked: presencial/híbrido explícito fora de Maceió, restrição explícita a
+ *          residentes de outro país ou exclusão explícita do Brasil.
  * unknown: modalidade desconhecida, sinais contraditórios, elegibilidade
- *          geográfica incerta ou restrição de residência não classificável.
+ *          geográfica incerta (ex.: exigência estrangeira com alternativa no
+ *          Brasil, localização estrangeira com elegibilidade explícita ao
+ *          Brasil na descrição) ou restrição de residência não classificável.
+ *
+ * A elegibilidade brasileira é admitida na LOCALIZAÇÃO da vaga, em exigências
+ * explícitas de residência ou quando a DESCRIÇÃO declara explicitamente aceitar
+ * candidatos residentes no Brasil. Menções genéricas no anúncio (clientes,
+ * escritórios ou empresa global) NÃO comprovam que residentes no Brasil podem
+ * se candidatar.
  */
 export function classifyJobLocation(job: Job): JobLocation {
   const location = normalize(job.location ?? "");
+  const description = normalize(job.description ?? "");
   const scope = normalize(
     `${job.location ?? ""} ${job.title ?? ""} ${job.description ?? ""}`,
   );
 
-  // Restrições explícitas de residência (localização, título e descrição) têm
-  // prioridade, inclusive em vagas remotas.
+  // Exclusão explícita de candidatos residentes no Brasil: incompatível.
+  if (BRAZIL_EXCLUSION.test(scope)) {
+    return "blocked";
+  }
+
+  // Restrição explícita a residentes de outro país: incompatível.
   if (FOREIGN_ONLY.test(scope)) {
     return "blocked";
   }
 
+  // Demais exigências explícitas de residência (localização, título e descrição)
+  // têm prioridade, inclusive em vagas remotas.
   const restriction = evaluateResidenceRestriction(scope);
   if (restriction !== "none") {
     return restriction;
@@ -272,21 +398,35 @@ export function classifyJobLocation(job: Job): JobLocation {
     return "allowed";
   }
 
-  // Presencial ou híbrido explícito fora de Maceió: bloqueado.
+  // Localização com país, região ou cidade/estado brasileiro reconhecido.
+  // Em "El Salvador"/"San Salvador" (estrangeiros) o termo "Salvador" é
+  // removido antes da checagem para não confundir com a cidade brasileira.
+  const brazilPlace = BRAZIL_PLACE.test(
+    location.replace(FOREIGN_SHADOWING_BRAZIL, " "),
+  );
+  const locationEligible = ELIGIBLE_REGION.test(location) || brazilPlace;
+
+  // Presencial ou híbrido explícito fora de Maceió: bloqueado quando há
+  // localização; sem localização identificável permanece indefinido.
   if (modality === "onsite") {
     return location ? "blocked" : "unknown";
   }
 
   // Remoto explícito: exige evidência de elegibilidade para residentes no Brasil.
   if (modality === "remote") {
-    if (ELIGIBLE_REGION.test(location)) {
+    if (locationEligible) {
       return "allowed";
     }
 
+    // Localização estrangeira explícita. Se a descrição indicar de forma
+    // EXPLÍCITA que aceita candidatos residentes no Brasil, preserva a vaga
+    // como indefinida para a IA; menções genéricas (clientes, escritórios,
+    // empresa global) NÃO liberam e a vaga permanece bloqueada.
     if (FOREIGN_LOCATION.test(location)) {
-      return "blocked";
+      return BRAZIL_ELIGIBILITY.test(description) ? "unknown" : "blocked";
     }
 
+    // Sem informação geográfica suficiente para confirmar: indefinida.
     return "unknown";
   }
 

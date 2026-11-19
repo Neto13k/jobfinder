@@ -1,6 +1,10 @@
 import { scrapeJobs, type Job as ScrapedJob, type ScrapeOptions, type SiteName } from "ts-jobspy";
 
 import { classifyJobModality } from "../services/location-filter.js";
+import {
+  toRateLimitError,
+  withRateLimitGuard,
+} from "../services/rate-limit.js";
 import type { Job } from "../types/job.js";
 
 /** Origem das vagas. */
@@ -58,6 +62,9 @@ export interface IndeedSearchParams {
  * @returns Vagas normalizadas, com ID estável, descrição completa, URL e localização originais.
  * @throws {Error} Se o termo de busca estiver vazio, se faltarem os metadados do
  * Indeed ou se a coleta terminar em `error`.
+ * @throws {RateLimitError} Se a coleta indicar rate limiting (HTTP 429); o erro
+ * carrega as vagas já coletadas (vazio em `error`, preservadas em `partial`).
+ * Uma rejeição direta da promessa de coleta também é convertida nesse erro.
  */
 export async function fetchIndeedJobs(
   params: IndeedSearchParams,
@@ -96,7 +103,10 @@ export async function fetchIndeedJobs(
     options.resultsWanted = params.resultsWanted;
   }
 
-  const result = await scrapeJobs(options);
+  // Converte uma eventual rejeição direta da coleta (ex.: `RateLimitException`
+  // escapando da biblioteca) em `RateLimitError`; os demais erros são
+  // repropagados sem alteração.
+  const result = await withRateLimitGuard(() => scrapeJobs(options), SOURCE);
 
   const siteMeta = result.meta.sites.find((entry) => entry.site === SITE);
 
@@ -105,6 +115,30 @@ export async function fetchIndeedJobs(
     throw new Error(
       "A coleta do Indeed não retornou metadados; não é possível confirmá-la como bem-sucedida.",
     );
+  }
+
+  const jobs: Job[] = [];
+
+  for (const scraped of result.jobs) {
+    const job = toJob(scraped);
+
+    if (!job) {
+      // Aviso genérico: não expõe URL, título nem conteúdo da vaga descartada.
+      console.warn(
+        "Vaga do Indeed descartada: URL não-HTTPS, fora do domínio oficial ou ID não identificável.",
+      );
+      continue;
+    }
+
+    jobs.push(job);
+  }
+
+  // Rate limiting (HTTP 429): sinaliza o orquestrador para interromper apenas as
+  // pesquisas restantes do Indeed, preservando as vagas já convertidas
+  // (inclusive as de um retorno parcial).
+  const rateLimit = toRateLimitError(SOURCE, siteMeta.status, siteMeta.error, jobs);
+  if (rateLimit) {
+    throw rateLimit;
   }
 
   switch (siteMeta.status) {
@@ -131,22 +165,6 @@ export async function fetchIndeedJobs(
     console.warn(
       `Indeed ignorou filtros não suportados: ${siteMeta.unsupportedOptions.join(", ")}.`,
     );
-  }
-
-  const jobs: Job[] = [];
-
-  for (const scraped of result.jobs) {
-    const job = toJob(scraped);
-
-    if (!job) {
-      // Aviso genérico: não expõe URL, título nem conteúdo da vaga descartada.
-      console.warn(
-        "Vaga do Indeed descartada: URL não-HTTPS, fora do domínio oficial ou ID não identificável.",
-      );
-      continue;
-    }
-
-    jobs.push(job);
   }
 
   return jobs;

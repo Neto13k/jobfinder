@@ -1,4 +1,5 @@
 import type { Job } from "../types/job.js";
+import { fetchBoardWithTimeout } from "./board-http.js";
 
 /** Origem das vagas. */
 const SOURCE = "greenhouse";
@@ -26,21 +27,27 @@ interface GreenhouseJobsResponse {
 /**
  * Busca as vagas de um quadro público da Greenhouse e as normaliza para {@link Job}.
  *
+ * A requisição é limitada ao timeout dos boards públicos (ver
+ * {@link fetchBoardWithTimeout}).
+ *
  * @param boardToken Identificador do quadro (board) na Greenhouse.
+ * @throws {BoardTimeoutError} Se a requisição exceder o timeout.
  * @throws {Error} Se a resposta HTTP for de erro.
  */
 export async function fetchGreenhouseJobs(boardToken: string): Promise<Job[]> {
-  const response = await fetch(
-    `${API_BASE_URL}/${encodeURIComponent(boardToken)}/jobs?content=true`
+  const data = await fetchBoardWithTimeout(
+    `${API_BASE_URL}/${encodeURIComponent(boardToken)}/jobs?content=true`,
+    SOURCE,
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Falha ao consultar a Greenhouse (board "${boardToken}"): ${response.status} ${response.statusText}`,
+        );
+      }
+
+      return (await response.json()) as GreenhouseJobsResponse;
+    },
   );
-
-  if (!response.ok) {
-    throw new Error(
-      `Falha ao consultar a Greenhouse (board "${boardToken}"): ${response.status} ${response.statusText}`,
-    );
-  }
-
-  const data = (await response.json()) as GreenhouseJobsResponse;
 
   return data.jobs.map((job) => {
     const location = job.location?.name ?? "";

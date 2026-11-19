@@ -1,23 +1,41 @@
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { BOARD_JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
+import { BoardTimeoutError } from "./providers/board-http.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
+import { fetchInhireJobs } from "./providers/inhire.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
-import { analyzeJob, type JobAnalysis } from "./services/ai-analyzer.js";
 import {
-  getAnalyzedJob,
+  analyzeJob,
+  GeminiAnalysisError,
+  type JobAnalysis,
+} from "./services/ai-analyzer.js";
+import {
+  getReusableAnalysis,
   markJobAsAnalyzed,
 } from "./services/analysis-history.js";
 import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
-import { filterByLocation } from "./services/location-filter.js";
+import {
+  classifyJobLocation,
+  filterByLocation,
+  type JobLocation,
+} from "./services/location-filter.js";
 import {
   notifyWithReservation,
   type NotificationCandidate,
+  type NotificationKind,
 } from "./services/notification-dispatch.js";
 import { classifyNotification } from "./services/notification-policy.js";
+import {
+  collectSearchBatch,
+  RateLimitError,
+} from "./services/rate-limit.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
 import {
   LINKEDIN_TOTAL_BATCHES,
@@ -65,15 +83,51 @@ function parseMaxAnalyses(raw: string | undefined): number {
 
 const MAX_ANALYSES = parseMaxAnalyses(process.env.JOBFINDER_MAX_ANALYSES);
 
+/** Máximo de exemplos de vagas exibidos por categoria nos logs de filtros. */
+const MAX_LOG_EXAMPLES = 5;
+
 /** Totais exibidos no resumo final da execução. */
-interface RunSummary {
+export interface RunSummary {
   analyzed: number;
+  recovered: number;
   compatible: number;
   incompatible: number;
   review: number;
   sentCompatible: number;
   sentReview: number;
+  // Análises malsucedidas (cota, indisponibilidade, rede, autenticação ou
+  // resposta inválida); nunca registradas como análise válida.
+  failedAnalyses: number;
+  // Vagas barradas pelo limite de análises, separadas por histórico consultado.
+  unanalyzedByLimit: number;
+  unscannedByLimit: number;
+  // Vagas sem análise porque a IA ficou indisponível nesta execução (falha
+  // global), diferenciadas do limite de tentativas e das falhas em si.
+  unanalyzedByGemini: number;
 }
+
+/** Motivo pelo qual uma vaga analisada não gerou notificação. */
+type SkipReason =
+  | "incompatible"
+  | "review_not_eligible"
+  | "location"
+  | "contract"
+  | "notifications_disabled"
+  | "reviews_disabled"
+  | "already_notified"
+  | "run_limit";
+
+/** Rótulos, em português, de cada motivo de não notificação. */
+const SKIP_REASON_LABELS: Record<SkipReason, string> = {
+  incompatible: "incompatibilidade",
+  review_not_eligible: "revisão não elegível para notificação",
+  location: "localização indefinida ou bloqueada",
+  contract: "contratação indefinida ou bloqueada",
+  notifications_disabled: "notificações desativadas",
+  reviews_disabled: "alertas de revisão desativados",
+  already_notified: "vaga já notificada ou reservada",
+  run_limit: "limite de notificações por execução",
+};
 
 /**
  * Descreve uma fonte para os logs, cobrindo as fontes sem `identifier`.
@@ -85,6 +139,33 @@ function describeSource(source: JobSource): string {
   }
 
   return `${source.provider} (${source.identifier})`;
+}
+
+/**
+ * Descreve uma vaga para os logs.
+ *
+ * Expõe apenas metadados de seleção (título, empresa, fonte, localização e data
+ * de publicação); nunca credenciais nem a descrição completa da vaga.
+ */
+function describeJob(job: Job): string {
+  const location = job.location ? job.location : "localização não informada";
+  const published = job.publishedAt
+    ? ` | publicado em ${job.publishedAt}`
+    : "";
+
+  return `${job.title} (${job.company}) | fonte ${job.source} | ${location}${published}`;
+}
+
+/**
+ * Registra a quantidade de vagas de um grupo e até {@link MAX_LOG_EXAMPLES}
+ * exemplos, para evidenciar os gargalos de cada etapa sem poluir o log.
+ */
+function logJobGroup(header: string, jobs: Job[]): void {
+  console.log(`${header}: ${jobs.length}`);
+
+  for (const job of jobs.slice(0, MAX_LOG_EXAMPLES)) {
+    console.log(`  - ${describeJob(job)}`);
+  }
 }
 
 /**
@@ -138,6 +219,9 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
       case "ashby":
         jobs = await fetchAshbyJobs(source.identifier);
         break;
+      case "inhire":
+        jobs = await fetchInhireJobs(source.identifier);
+        break;
       case "linkedin":
         jobs = await fetchLinkedInJobs(source);
         break;
@@ -150,6 +234,20 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
 
     return jobs;
   } catch (error) {
+    // Rate limiting é propagado ao orquestrador para interromper apenas as
+    // pesquisas restantes deste provider; os demais erros seguem isolados aqui.
+    if (error instanceof RateLimitError) {
+      throw error;
+    }
+
+    // Timeout dos boards públicos é destacado do erro comum nos logs.
+    if (error instanceof BoardTimeoutError) {
+      console.error(
+        `Timeout de ${error.timeoutMs} ms ao coletar da fonte ${label}.`,
+      );
+      return [];
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Falha ao coletar da fonte ${label}: ${message}`);
     return [];
@@ -161,18 +259,14 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
  *
  * A execução é sequencial de propósito: as buscas concorreriam na mesma sessão
  * da biblioteca ts-jobspy e a rotação só precisa de uma por vez. A falha de uma
- * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais.
+ * pesquisa é isolada por {@link fetchJobsFromSource} e não interrompe as demais,
+ * exceto no rate limiting (HTTP 429), que interrompe apenas as pesquisas
+ * restantes deste provider preservando as vagas já coletadas.
  */
 async function fetchSearchBatch(
   searches: readonly JobSource[],
 ): Promise<Job[]> {
-  const collected: Job[] = [];
-
-  for (const search of searches) {
-    collected.push(...(await fetchJobsFromSource(search)));
-  }
-
-  return collected;
+  return collectSearchBatch(searches, fetchJobsFromSource, describeSource);
 }
 
 /**
@@ -194,49 +288,178 @@ async function fetchRotatedBatches(
 }
 
 /**
+ * Dependências do processamento, injetáveis nos testes.
+ *
+ * Permitem substituir a análise de IA e o despacho de notificação sem tocar no
+ * Gemini nem no Telegram reais, preservando o restante do fluxo (histórico,
+ * deduplicação e limiares) exatamente como em produção.
+ */
+export interface ProcessDependencies {
+  /** Analisa uma vaga; deve lançar GeminiAnalysisError em falha. */
+  analyze: (job: Job) => Promise<JobAnalysis>;
+  /** Reserva e envia a notificação; devolve false se já estava reservada. */
+  notify: (
+    candidate: NotificationCandidate,
+    kind: NotificationKind,
+  ) => Promise<boolean>;
+}
+
+/** Dependências reais usadas em produção. */
+const DEFAULT_DEPENDENCIES: ProcessDependencies = {
+  analyze: analyzeJob,
+  notify: (candidate, kind) => notifyWithReservation(candidate, kind),
+};
+
+/**
  * Processa as vagas na ordem recebida (prioridade geográfica).
  *
  * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (inclusive
  * as marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
  * notificação por execução, priorizando as vagas compatíveis.
+ *
+ * Quando a IA fica indisponível (falha global, não específica dos dados da
+ * vaga), novas chamadas ao Gemini são interrompidas pelo restante da execução,
+ * mas o laço continua: as análises já salvas seguem sendo reaproveitadas e as
+ * vagas pendentes serão reprocessadas numa próxima execução.
+ *
+ * @param jobs Vagas já filtradas e priorizadas.
+ * @param deps Dependências do processamento (padrão: implementações reais).
  */
-async function processJobs(jobs: Job[]): Promise<RunSummary> {
+export async function processJobs(
+  jobs: Job[],
+  deps: ProcessDependencies = DEFAULT_DEPENDENCIES,
+): Promise<RunSummary> {
   const summary: RunSummary = {
     analyzed: 0,
+    recovered: 0,
     compatible: 0,
     incompatible: 0,
     review: 0,
     sentCompatible: 0,
     sentReview: 0,
+    failedAnalyses: 0,
+    unanalyzedByLimit: 0,
+    unscannedByLimit: 0,
+    unanalyzedByGemini: 0,
+  };
+
+  // Contagem por motivo de não notificação, para o resumo do funil.
+  const skipCounts: Record<SkipReason, number> = {
+    incompatible: 0,
+    review_not_eligible: 0,
+    location: 0,
+    contract: 0,
+    notifications_disabled: 0,
+    reviews_disabled: 0,
+    already_notified: 0,
+    run_limit: 0,
+  };
+
+  /** Contabiliza e registra o motivo pelo qual a vaga não gera notificação. */
+  const registerSkip = (job: Job, reason: SkipReason): void => {
+    skipCounts[reason]++;
+    console.log(
+      `Sem notificação: ${job.title} (${job.company}) | ` +
+        `motivo: ${SKIP_REASON_LABELS[reason]}`,
+    );
   };
 
   // Candidatos pendentes, na ordem de prioridade em que aparecem.
   let compatibleCandidate: NotificationCandidate | undefined;
   let reviewCandidate: NotificationCandidate | undefined;
 
+  // Vagas cuja iteração já começou; usado para medir o que sobra no break.
+  let processed = 0;
+
+  // Chamadas ao Gemini já realizadas nesta execução. Diferente de
+  // `summary.analyzed` (que conta só os sucessos), este contador limita as
+  // TENTATIVAS: uma falha também consome o limite, impedindo chamadas
+  // repetidas quando a API está indisponível ou com cota esgotada.
+  let analysesUsed = 0;
+
+  // Estado que impede novas chamadas à IA nesta execução após uma falha global
+  // (cota, indisponibilidade, rede ou autenticação). Não interrompe o laço: as
+  // análises salvas continuam sendo reaproveitadas e as vagas pendentes ficam
+  // elegíveis para a próxima execução.
+  let geminiBlocked = false;
+
   for (const job of jobs) {
-    // Limite de análises atingido: só continua se ainda houver envio pendente.
-    if (summary.analyzed >= MAX_ANALYSES) {
+    // Limite de chamadas atingido: só continua se ainda houver envio pendente.
+    if (analysesUsed >= MAX_ANALYSES) {
       if (!SEND_NOTIFICATIONS || compatibleCandidate) {
+        // As vagas restantes nem chegam a ter o histórico consultado.
+        summary.unscannedByLimit = jobs.length - processed;
         break;
       }
     }
 
+    processed++;
+
+    // Vaga já notificada/reservada: não é analisada nem notificada de novo.
     if (await isJobNotified(job)) {
+      skipCounts.already_notified++;
       continue;
     }
 
-    // Reaproveita a análise salva; só chama a IA quando não houver resultado.
-    let analysis: JobAnalysis | undefined = await getAnalyzedJob(job);
+    // Reaproveita a análise salva apenas se ela for da versão vigente dos
+    // critérios; análises antigas ou legadas são refeitas.
+    let analysis: JobAnalysis | undefined = await getReusableAnalysis(job);
+    let origin: "nova" | "recuperada" = "recuperada";
 
     if (!analysis) {
-      // Sem resultado salvo e limite atingido: não chama o Gemini.
-      if (summary.analyzed >= MAX_ANALYSES) {
+      // IA indisponível nesta execução: não faz novas chamadas. A vaga fica
+      // pendente e será reprocessada numa próxima execução.
+      if (geminiBlocked) {
+        summary.unanalyzedByGemini++;
         continue;
       }
 
+      // Sem resultado salvo e limite atingido: não chama o Gemini.
+      if (analysesUsed >= MAX_ANALYSES) {
+        // Histórico consultado, mas a vaga fica efetivamente sem análise.
+        summary.unanalyzedByLimit++;
+        continue;
+      }
+
+      origin = "nova";
       console.log(`Analisando: ${job.title} (${job.company})`);
-      analysis = await analyzeJob(job);
+
+      // Contabiliza a tentativa antes da chamada, mesmo se ela falhar.
+      analysesUsed++;
+
+      try {
+        analysis = await deps.analyze(job);
+      } catch (error) {
+        summary.failedAnalyses++;
+        const kind =
+          error instanceof GeminiAnalysisError ? error.kind : "unknown";
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `Falha na análise de ${job.title} (${job.company}) | ` +
+            `categoria: ${kind} | ${message}`,
+        );
+
+        // Falha específica dos dados da vaga (resposta vazia/estruturalmente
+        // inválida): isola apenas esta vaga e segue para a próxima.
+        if (kind === "invalid") {
+          continue;
+        }
+
+        // Cota, indisponibilidade, rede ou autenticação: impede novas chamadas
+        // ao Gemini nesta execução, sem interromper o laço. As análises salvas
+        // seguem sendo reaproveitadas e as vagas pendentes serão reprocessadas
+        // na próxima execução. Nenhuma falha é registrada como análise válida.
+        if (!geminiBlocked) {
+          geminiBlocked = true;
+          console.error(
+            "Novas análises interrompidas nesta execução (IA indisponível); " +
+              "as análises salvas continuam sendo reutilizadas e as vagas " +
+              "pendentes serão reprocessadas na próxima execução.",
+          );
+        }
+        continue;
+      }
+
       // Salva a nova análise imediatamente, inclusive as compatíveis.
       await markJobAsAnalyzed(job, analysis);
       summary.analyzed++;
@@ -248,36 +471,89 @@ async function processJobs(jobs: Job[]): Promise<RunSummary> {
       } else {
         summary.review++;
       }
+    } else {
+      summary.recovered++;
     }
 
+    const published = job.publishedAt
+      ? ` | publicado em ${job.publishedAt}`
+      : "";
+
     console.log(
-      `Resultado da IA: ${analysis.decision} | score ${analysis.score} | ` +
-        `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus}`,
+      `Resultado da IA: ${job.title} (${job.company}) | fonte ${job.source}${published} | ` +
+        `origem ${origin} | ${analysis.decision} | score ${analysis.score} | ` +
+        `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus} | ` +
+        `motivo: ${analysis.reason}`,
     );
 
     const kind = classifyNotification(analysis);
 
     // Compatível tem prioridade; revisão só conta quando habilitada.
-    if (kind === "compatible" && SEND_NOTIFICATIONS && !compatibleCandidate) {
-      compatibleCandidate = { job, analysis };
-    } else if (kind === "manual_review" && SEND_REVIEWS && !reviewCandidate) {
-      reviewCandidate = { job, analysis };
+    if (kind === "compatible") {
+      if (!SEND_NOTIFICATIONS) {
+        registerSkip(job, "notifications_disabled");
+      } else if (compatibleCandidate) {
+        // Já há uma compatível escolhida nesta execução: limite de envio.
+        registerSkip(job, "run_limit");
+      } else {
+        compatibleCandidate = { job, analysis };
+      }
+    } else if (kind === "manual_review") {
+      // Sem o envio geral, o motivo raiz é "notificações desativadas": o envio
+      // de revisão só é considerado quando o envio geral está ligado.
+      if (!SEND_NOTIFICATIONS) {
+        registerSkip(job, "notifications_disabled");
+      } else if (!SEND_REVIEWS) {
+        registerSkip(job, "reviews_disabled");
+      } else if (reviewCandidate) {
+        registerSkip(job, "run_limit");
+      } else {
+        reviewCandidate = { job, analysis };
+      }
+    } else if (analysis.decision === "review") {
+      // Revisão fora dos critérios do aviso (localização permitida + contratação
+      // indefinida): não é uma incompatibilidade real.
+      registerSkip(job, "review_not_eligible");
+    } else if (analysis.locationStatus !== "allowed") {
+      registerSkip(job, "location");
+    } else if (analysis.contractStatus !== "allowed") {
+      registerSkip(job, "contract");
+    } else {
+      registerSkip(job, "incompatible");
     }
   }
 
   // Uma notificação por execução: compatível antes de revisão manual.
   if (compatibleCandidate) {
     const { job } = compatibleCandidate;
-    if (await notifyWithReservation(compatibleCandidate, "compatible")) {
+    if (await deps.notify(compatibleCandidate, "compatible")) {
       summary.sentCompatible++;
       console.log(`Notificação enviada: ${job.title} (${job.company})`);
+    } else {
+      registerSkip(job, "already_notified");
+    }
+
+    // A revisão não é enviada quando já há uma compatível nesta execução.
+    if (reviewCandidate) {
+      registerSkip(reviewCandidate.job, "run_limit");
     }
   } else if (reviewCandidate) {
     const { job } = reviewCandidate;
-    if (await notifyWithReservation(reviewCandidate, "manual_review")) {
+    if (await deps.notify(reviewCandidate, "manual_review")) {
       summary.sentReview++;
       console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
+    } else {
+      registerSkip(job, "already_notified");
     }
+  }
+
+  // Resumo dos motivos de não notificação, na ordem declarada em SkipReason.
+  const skipEntries = (Object.keys(skipCounts) as SkipReason[])
+    .filter((reason) => skipCounts[reason] > 0)
+    .map((reason) => `${SKIP_REASON_LABELS[reason]}: ${skipCounts[reason]}`);
+
+  if (skipEntries.length > 0) {
+    console.log(`Motivos de não notificação: ${skipEntries.join(" | ")}`);
   }
 
   return summary;
@@ -312,6 +588,25 @@ async function main() {
     // Ordena por prioridade geográfica sem descartar vagas elegíveis.
     const prioritizedJobs = prioritizeJobs(eligibleJobs);
 
+    // Grupos descartados por etapa, derivados por identidade de objeto (os
+    // filtros preservam as referências), sem alterar as regras de elegibilidade.
+    const developerSet = new Set(developerJobs);
+    const senioritySet = new Set(seniorityJobs);
+    const discardedByDedupe = jobs.length - uniqueJobs.length;
+    const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
+    const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
+    // Classificação da localização apenas para observabilidade (função pura).
+    const locationByJob = new Map<Job, JobLocation>();
+    for (const job of seniorityJobs) {
+      locationByJob.set(job, classifyJobLocation(job));
+    }
+    const blockedByLocation = seniorityJobs.filter(
+      (job) => locationByJob.get(job) === "blocked",
+    );
+    const unknownLocationJobs = seniorityJobs.filter(
+      (job) => locationByJob.get(job) === "unknown",
+    );
+
     console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
     console.log(`Desenvolvimento: ${developerJobs.length}`);
     console.log(`Após senioridade: ${seniorityJobs.length}`);
@@ -319,14 +614,26 @@ async function main() {
     console.log(`Armazenamento: ${getStorageBackend()}`);
     console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
 
+    // Detalhamento dos descartes de cada filtro, com exemplos.
+    console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
+    logJobGroup("Descartadas por desenvolvimento", discardedByDeveloper);
+    logJobGroup("Descartadas por senioridade", discardedBySeniority);
+    logJobGroup("Bloqueadas por localização", blockedByLocation);
+    logJobGroup("Localização indefinida", unknownLocationJobs);
+
     const summary = await processJobs(prioritizedJobs);
 
     console.log(
       `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
+        `${summary.recovered} recuperada(s) do histórico | ` +
         `${summary.compatible} compatível(is) | ${summary.incompatible} incompatível(is) | ` +
         `${summary.review} em revisão | ` +
         `${summary.sentCompatible} notificação(ões) compatível(is) | ` +
-        `${summary.sentReview} notificação(ões) de revisão`,
+        `${summary.sentReview} notificação(ões) de revisão | ` +
+        `${summary.failedAnalyses} análise(s) malsucedida(s) | ` +
+        `${summary.unanalyzedByLimit} não analisada(s) por limite (histórico consultado) | ` +
+        `${summary.unanalyzedByGemini} não analisada(s) por indisponibilidade da IA | ` +
+        `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
     );
   } catch (error) {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
@@ -337,4 +644,28 @@ async function main() {
   }
 }
 
-main();
+/**
+ * Indica se este módulo é o ponto de entrada (`node dist/index.js`).
+ *
+ * A importação em testes não dispara o pipeline; apenas a execução direta roda
+ * `main`. A comparação normaliza caixa para tolerar a grafia da unidade no
+ * Windows.
+ */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  try {
+    return (
+      resolve(entry).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main();
+}
