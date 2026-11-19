@@ -209,7 +209,9 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   assert.deepEqual(
     Object.keys(ok1).sort(),
     [
+      "additionalLocations",
       "company",
+      "contractTypes",
       "description",
       "discardStage",
       "id",
@@ -222,8 +224,15 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
       "source",
       "title",
       "url",
+      "workplaceType",
     ].sort(),
   );
+
+  // Campos estruturados ausentes (a vaga é estática) viram null/[] com a chave
+  // presente, preservando a paridade entre memória e disco.
+  assert.equal(ok1.workplaceType, null);
+  assert.deepEqual(ok1.contractTypes, []);
+  assert.deepEqual(ok1.additionalLocations, []);
 
   const dup = byKey.get("greenhouse:dup");
   assert.equal(dup.discardStage, null);

@@ -6,6 +6,7 @@ import {
   fetchBoardWithTimeout,
   isTimeoutError,
 } from "./board-http.js";
+import { toStringList, toWorkplaceType } from "./normalize.js";
 
 /** Origem das vagas. */
 const SOURCE = "inhire";
@@ -400,10 +401,10 @@ function toJob(
     asString(detail.workplaceType) ?? asString(summary.workplaceType);
   const company = firstNonEmpty(detail.tenantName, tenantName, slug) ?? slug;
   const jobId = firstNonEmpty(detail.jobId, summary.jobId) ?? summary.jobId;
-  const contractTypes = normalizeContractType(detail.contractType);
+  const contractTypes = toStringList(detail.contractType);
   const description = asString(detail.description) ?? "";
 
-  return {
+  const job: Job = {
     id: summary.jobId,
     title,
     company,
@@ -416,6 +417,20 @@ function toJob(
     // Somente a data real de publicação; a data da coleta nunca é usada.
     publishedAt: firstNonEmpty(detail.publishedAt),
   };
+
+  // Modalidade estruturada: diferenciando presencial, híbrido, remoto e
+  // desconhecido. Quando a fonte não informa modalidade, o campo é omitido.
+  const structuredWorkplaceType = toWorkplaceType(workplaceType);
+  if (structuredWorkplaceType !== undefined) {
+    job.workplaceType = structuredWorkplaceType;
+  }
+
+  // Tipos de contratação em campo próprio, além da evidência na descrição.
+  if (contractTypes.length > 0) {
+    job.contractTypes = contractTypes;
+  }
+
+  return job;
 }
 
 /**
@@ -434,18 +449,6 @@ function buildDescription(description: string, contractTypes: string[]): string 
   const evidence = `${CONTRACT_TYPE_LABEL}: ${contractTypes.join(", ")}`;
 
   return description.trim() === "" ? evidence : `${evidence}\n\n${description}`;
-}
-
-/** Extrai os tipos de contratação não vazios informados pela InHire. */
-function normalizeContractType(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter((item) => item !== "");
 }
 
 /** Retorna o valor apenas se for string (defesa contra tipos inesperados da API). */

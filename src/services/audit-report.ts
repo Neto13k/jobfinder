@@ -10,7 +10,7 @@ import {
   type JobLocation,
 } from "./location-filter.js";
 import { filterBySeniority } from "./seniority-filter.js";
-import type { Job } from "../types/job.js";
+import type { Job, JobWorkplaceType } from "../types/job.js";
 
 /** Etapa do pipeline que descartou a vaga. */
 export type AuditDiscardStage = "developer" | "seniority" | "location";
@@ -28,6 +28,12 @@ export interface AuditJobEntry {
   url: string;
   /** Data de publicação; null quando ausente (serializa igual em memória e disco). */
   publishedAt: string | null;
+  /** Modalidade estruturada da fonte; null quando ausente. */
+  workplaceType: JobWorkplaceType | null;
+  /** Tipos de contratação informados pela fonte; vazio quando ausentes. */
+  contractTypes: string[];
+  /** Localidades adicionais informadas pela fonte; vazio quando ausentes. */
+  additionalLocations: string[];
   /** Etapa que descartou a vaga; null quando aprovada nos filtros. */
   discardStage: AuditDiscardStage | null;
   /** Classificação geográfica; null quando a vaga não chegou à etapa de localização. */
@@ -89,6 +95,11 @@ function toEntry(
     description: job.description,
     url: job.url,
     publishedAt: job.publishedAt ?? null,
+    // Campos estruturados: null/[] quando ausentes, para manter a chave presente
+    // e a serialização idêntica em memória e disco.
+    workplaceType: job.workplaceType ?? null,
+    contractTypes: job.contractTypes ?? [],
+    additionalLocations: job.additionalLocations ?? [],
     discardStage,
     locationClassification,
     queuePosition,

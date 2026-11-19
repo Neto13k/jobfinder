@@ -6,6 +6,7 @@ import {
   withRateLimitGuard,
 } from "../services/rate-limit.js";
 import type { Job } from "../types/job.js";
+import { toStringList, toWorkplaceType } from "./normalize.js";
 
 /** Origem das vagas. */
 const SOURCE = "linkedin";
@@ -179,7 +180,7 @@ function toJob(scraped: ScrapedJob): Job | undefined {
   const location = scraped.location ?? "";
   const description = scraped.description ?? "";
 
-  return {
+  const job: Job = {
     id,
     title: scraped.title,
     company: scraped.company ?? "",
@@ -188,8 +189,8 @@ function toJob(scraped: ScrapedJob): Job | undefined {
     // inferida dos sinais do próprio anúncio (título/localização/descrição), e
     // não do filtro `isRemote` usado na pesquisa — remoto nessa busca não prova
     // que cada vaga retornada seja remota. `false` significa "não confirmado
-    // como remoto", nunca "presencial"; ampliar `Job.remote` para um estado
-    // tri-state fica pendente.
+    // como remoto", nunca "presencial". A modalidade estruturada fica em
+    // `workplaceType`, quando o anúncio a informa.
     remote:
       classifyJobModality({
         title: scraped.title,
@@ -201,6 +202,39 @@ function toJob(scraped: ScrapedJob): Job | undefined {
     source: SOURCE,
     publishedAt: scraped.datePosted ?? undefined,
   };
+
+  // Campos estruturados do próprio anúncio (não do filtro de pesquisa), apenas
+  // quando disponíveis; nada é inferido por ausência.
+  const contractTypes = toStringList(scraped.jobTypes);
+  if (contractTypes.length > 0) {
+    job.contractTypes = contractTypes;
+  }
+
+  const workplace = resolveStructuredWorkplaceType(scraped);
+  if (workplace !== undefined) {
+    job.workplaceType = workplace;
+  }
+
+  return job;
+}
+
+/**
+ * Modalidade estruturada informada pelo próprio anúncio do LinkedIn.
+ *
+ * Prefere o campo `workFromHomeType`; na sua ausência, usa a confirmação
+ * booleana `isRemote === true`. Nunca infere presencial a partir da ausência do
+ * sinal de remoto.
+ */
+function resolveStructuredWorkplaceType(
+  scraped: ScrapedJob,
+): ReturnType<typeof toWorkplaceType> {
+  const fromField = toWorkplaceType(scraped.workFromHomeType);
+
+  if (fromField !== undefined) {
+    return fromField;
+  }
+
+  return scraped.isRemote === true ? "remote" : undefined;
 }
 
 /**
