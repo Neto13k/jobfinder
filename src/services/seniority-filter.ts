@@ -7,8 +7,11 @@ import type { Job } from "../types/job.js";
 const SENIORITY_PATTERN =
   /\b(senior|sr|pleno|mid[\s-]?level|staff|principal|lead|especialista|specialist)\b/;
 
-/** Remove acentos e força minúsculas, para comparar sem depender da escrita. */
-function normalize(text: string): string {
+/**
+ * Remove acentos e força minúsculas, para comparar sem depender da escrita.
+ * Preserva espaços e pontuação (não colapsa nem remove caracteres).
+ */
+export function normalize(text: string): string {
   return text
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")

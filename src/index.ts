@@ -109,7 +109,6 @@ export interface RunSummary {
 /** Motivo pelo qual uma vaga analisada não gerou notificação. */
 type SkipReason =
   | "incompatible"
-  | "review_not_eligible"
   | "location"
   | "contract"
   | "notifications_disabled"
@@ -120,7 +119,6 @@ type SkipReason =
 /** Rótulos, em português, de cada motivo de não notificação. */
 const SKIP_REASON_LABELS: Record<SkipReason, string> = {
   incompatible: "incompatibilidade",
-  review_not_eligible: "revisão não elegível para notificação",
   location: "localização indefinida ou bloqueada",
   contract: "contratação indefinida ou bloqueada",
   notifications_disabled: "notificações desativadas",
@@ -346,7 +344,6 @@ export async function processJobs(
   // Contagem por motivo de não notificação, para o resumo do funil.
   const skipCounts: Record<SkipReason, number> = {
     incompatible: 0,
-    review_not_eligible: 0,
     location: 0,
     contract: 0,
     notifications_disabled: 0,
@@ -510,10 +507,6 @@ export async function processJobs(
       } else {
         reviewCandidate = { job, analysis };
       }
-    } else if (analysis.decision === "review") {
-      // Revisão fora dos critérios do aviso (localização permitida + contratação
-      // indefinida): não é uma incompatibilidade real.
-      registerSkip(job, "review_not_eligible");
     } else if (analysis.locationStatus !== "allowed") {
       registerSkip(job, "location");
     } else if (analysis.contractStatus !== "allowed") {

@@ -15,6 +15,9 @@ const { buildPrompt, parseAnalysis, SYSTEM_INSTRUCTION } = await import(
 const { classifyGeminiError, GeminiAnalysisError } = await import(
   "../dist/services/ai-analyzer.js"
 );
+const { classifyNotification } = await import(
+  "../dist/services/notification-policy.js"
+);
 
 /** Monta uma vaga mínima com os campos sobrepostos. */
 function job(overrides) {
@@ -141,6 +144,72 @@ test("parseAnalysis aplica a regra de negócio de bloqueio e revisão", () => {
   assert.equal(
     parseAnalysis({ ...VALID, contractStatus: "unknown" }).decision,
     "review",
+  );
+});
+
+test("TASK-08: parser e política de notificação são coerentes na matriz", () => {
+  // A IA responde "compatible"; o parser rebaixa para "review" ao encontrar
+  // informação indefinida e a política converte isso em revisão manual.
+  const base = { decision: "compatible", score: 80, reason: "ok" };
+
+  assert.equal(
+    classifyNotification(
+      parseAnalysis({
+        ...base,
+        locationStatus: "allowed",
+        contractStatus: "allowed",
+      }),
+    ),
+    "compatible",
+  );
+
+  for (const [locationStatus, contractStatus] of [
+    ["allowed", "unknown"],
+    ["unknown", "allowed"],
+    ["unknown", "unknown"],
+  ]) {
+    assert.equal(
+      classifyNotification(
+        parseAnalysis({ ...base, locationStatus, contractStatus }),
+      ),
+      "manual_review",
+    );
+  }
+
+  // Decisão "review" com critérios permitidos não é promovida a compatível.
+  assert.equal(
+    classifyNotification(
+      parseAnalysis({
+        decision: "review",
+        score: 80,
+        reason: "requisitos a confirmar",
+        locationStatus: "allowed",
+        contractStatus: "allowed",
+      }),
+    ),
+    "manual_review",
+  );
+
+  // Bloqueio em qualquer critério rebaixa para "incompatible" e não notifica.
+  assert.equal(
+    classifyNotification(
+      parseAnalysis({
+        ...base,
+        locationStatus: "blocked",
+        contractStatus: "allowed",
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    classifyNotification(
+      parseAnalysis({
+        ...base,
+        locationStatus: "allowed",
+        contractStatus: "blocked",
+      }),
+    ),
+    null,
   );
 });
 

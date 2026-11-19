@@ -31,7 +31,7 @@ const MAX_DESCRIPTION_LENGTH = 4000;
  * da resposta mudarem. O histórico só reutiliza uma análise quando ela foi
  * gravada com esta versão; as demais são reanalisadas.
  */
-export const ANALYSIS_CRITERIA_VERSION = "2026-11-18.1";
+export const ANALYSIS_CRITERIA_VERSION = "2026-11-19.1";
 
 /** Regras de negócio e proteção contra injeção de prompt. */
 export const SYSTEM_INSTRUCTION = `Você analisa a compatibilidade de vagas de tecnologia com um candidato.
