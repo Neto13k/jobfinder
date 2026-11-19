@@ -688,6 +688,254 @@ test("triagem geográfica: elegibilidade explícita não confunde menções gen�
   );
 });
 
+// --- TASK-01: elegibilidade EXPLÍCITA ao Brasil em vagas remotas -----------
+//
+// Correção do filtro geográfico: vagas remotas sem localidade estrangeira
+// contraditória passam a ser "allowed" quando a DESCRIÇÃO declara de forma
+// explícita aceitar residentes no Brasil. A ausência de restrição continua NÃO
+// sendo tratada como elegibilidade (permanece "unknown").
+
+test("TASK-01: remote e remoto sem país informado permanecem indefinidos", () => {
+  // Localização genérica ("Remote"/"Remoto") sem país e sem evidência explícita:
+  // a ausência de restrição NÃO confirma elegibilidade.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "unknown",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("TASK-01: localização vazia com remote=true permanece indefinida sem evidência", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "",
+        remote: true,
+        description: "",
+      }),
+    ),
+    "unknown",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "",
+        remote: true,
+        description: "Buscamos pessoa desenvolvedora para integrar o time.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("TASK-01: elegibilidade explícita ao Brasil libera remoto sem país informado", () => {
+  // Modalidade remota confirmada e descrição declarando EXPLICITAMENTE aceitar
+  // residentes no Brasil: antes ficava "unknown"; agora é "allowed".
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "Vaga 100% remota e aberta a residentes no Brasil.",
+      }),
+    ),
+    "allowed",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote",
+        remote: true,
+        description: "Open to candidates based in Brazil.",
+      }),
+    ),
+    "allowed",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote",
+        remote: true,
+        description: "Must reside in Brazil.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("TASK-01: localização vazia com remote=true e elegibilidade explícita é permitida", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "",
+        remote: true,
+        description: "Estamos contratando profissionais no Brasil.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("TASK-01: menção genérica na descrição não comprova elegibilidade brasileira", () => {
+  // Clientes e escritórios no Brasil NÃO são elegibilidade: permanece indefinida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "Atendemos clientes em todo o Brasil.",
+      }),
+    ),
+    "unknown",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remote",
+        remote: true,
+        description: "Somos uma empresa global com escritório no Brasil.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("TASK-01: vaga remota de fonte brasileira NÃO é presumida elegível", () => {
+  // A procedência (InHire, ATS brasileiro) NÃO confere elegibilidade: sem
+  // evidência explícita na localização/descrição, permanece indefinida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "Faça parte do nosso time de tecnologia.",
+        source: "inhire",
+      }),
+    ),
+    "unknown",
+  );
+  // Com evidência explícita, a mesma procedência passa a ser permitida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "Vaga remota aberta a residentes no Brasil.",
+        source: "inhire",
+      }),
+    ),
+    "allowed",
+  );
+});
+
+test("TASK-01: vaga remota de fonte internacional depende da evidência geográfica", () => {
+  // Fonte internacional com localização brasileira explícita: permitida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote - Brazil",
+        remote: true,
+        description: "",
+        source: "linkedin",
+      }),
+    ),
+    "allowed",
+  );
+  // Fonte internacional sem país informado e sem evidência: indefinida.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote",
+        remote: true,
+        description: "",
+        source: "linkedin",
+      }),
+    ),
+    "unknown",
+  );
+  // Fonte internacional com restrição estrangeira explícita: bloqueada.
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Junior Developer",
+        location: "Remote - United States",
+        remote: true,
+        description: "US residents only.",
+        source: "linkedin",
+      }),
+    ),
+    "blocked",
+  );
+});
+
+test("TASK-01: restrição contraditória entre país estrangeiro e Brasil fica indefinida", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior",
+        location: "Remoto",
+        remote: true,
+        description: "Vaga remota restrita a residentes de Portugal ou do Brasil.",
+      }),
+    ),
+    "unknown",
+  );
+});
+
+test("TASK-01: presencial e híbrido em Maceió permanecem permitidos", () => {
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior - Presencial",
+        location: "Maceió, Alagoas, Brazil",
+        remote: false,
+        description: "Vaga presencial em Maceió.",
+      }),
+    ),
+    "allowed",
+  );
+  assert.equal(
+    classifyJobLocation(
+      job({
+        title: "Desenvolvedor Júnior (Híbrido)",
+        location: "Maceió, Alagoas, Brazil",
+        remote: false,
+        description: "Híbrido: 2 dias no escritório em Maceió.",
+      }),
+    ),
+    "allowed",
+  );
+});
+
 test("política de notificação classifica compatível, revisão e nulo", () => {
   assert.equal(
     classifyNotification({

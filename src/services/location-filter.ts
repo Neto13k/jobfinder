@@ -426,6 +426,15 @@ export function classifyJobLocation(job: Job): JobLocation {
       return BRAZIL_ELIGIBILITY.test(description) ? "unknown" : "blocked";
     }
 
+    // Localização sem país/região estrangeiro contraditório (vazia ou genérica,
+    // como "Remote"/"Remoto"): se a descrição declara de forma EXPLÍCITA aceitar
+    // candidatos residentes no Brasil, a vaga é elegível. A ausência de restrição
+    // NÃO conta como elegibilidade — só a evidência explícita libera a vaga; os
+    // casos realmente indefinidos seguem conservadoramente como "unknown".
+    if (BRAZIL_ELIGIBILITY.test(description)) {
+      return "allowed";
+    }
+
     // Sem informação geográfica suficiente para confirmar: indefinida.
     return "unknown";
   }
