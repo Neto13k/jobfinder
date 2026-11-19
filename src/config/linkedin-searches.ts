@@ -1,6 +1,6 @@
 import type { LinkedInJobSource } from "./job-sources.js";
 
-/** Limite de vagas por pesquisa, igual em todas as 100 configurações. */
+/** Limite de vagas por pesquisa, igual em todas as 110 configurações. */
 export const LINKEDIN_RESULTS_WANTED = 10;
 
 /** Localização e `geoId` das pesquisas de Maceió/AL (presencial, híbrido e remoto). */
@@ -11,7 +11,7 @@ const LOCAL_GEO_ID = "102957102";
 const REMOTE_LOCATION = "Brazil";
 
 /**
- * 20 termos locais de Maceió/AL.
+ * 22 termos locais de Maceió/AL.
  *
  * Sem `isRemote` para cobrir presencial, híbrido e remoto; o `geoId` fixa a
  * busca na cidade. Evitam-se termos genéricos (nada de "desenvolvedor" puro).
@@ -37,10 +37,12 @@ const LOCAL_TERMS = [
   "estágio em programação",
   "estágio front-end",
   "estágio back-end",
+  "desenvolvedor de software",
+  "estágio em tecnologia",
 ] as const;
 
 /**
- * 80 termos remotos nacionais, com variações em português e inglês de júnior e
+ * 88 termos remotos nacionais, com variações em português e inglês de júnior e
  * estágio (desenvolvedor, full stack, front-end, back-end, React, Node.js,
  * JavaScript, TypeScript, web e estágios). Sem duplicatas.
  */
@@ -125,9 +127,17 @@ const REMOTE_TERMS = [
   "estágio desenvolvimento web",
   "estágio front-end",
   "estágio back-end",
+  "software engineer",
+  "react developer",
+  "node.js developer",
+  "javascript developer",
+  "typescript developer",
+  "full stack developer",
+  "frontend developer",
+  "backend developer",
 ] as const;
 
-/** 20 pesquisas locais de Maceió/AL fixadas por `geoId`. */
+/** 22 pesquisas locais de Maceió/AL fixadas por `geoId`. */
 export const LINKEDIN_LOCAL_SEARCHES: readonly LinkedInJobSource[] =
   LOCAL_TERMS.map(
     (searchTerm): LinkedInJobSource => ({
@@ -139,7 +149,7 @@ export const LINKEDIN_LOCAL_SEARCHES: readonly LinkedInJobSource[] =
     }),
   );
 
-/** 80 pesquisas remotas disponíveis para candidatos no Brasil. */
+/** 88 pesquisas remotas disponíveis para candidatos no Brasil. */
 export const LINKEDIN_REMOTE_SEARCHES: readonly LinkedInJobSource[] =
   REMOTE_TERMS.map(
     (searchTerm): LinkedInJobSource => ({

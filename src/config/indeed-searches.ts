@@ -10,7 +10,7 @@ export interface IndeedJobSource extends IndeedSearchParams {
   provider: "indeed";
 }
 
-/** Limite de vagas por pesquisa, igual em todas as 100 configurações. */
+/** Limite de vagas por pesquisa, igual em todas as 110 configurações. */
 export const INDEED_RESULTS_WANTED = 15;
 
 /** Localização das pesquisas de Maceió/AL (presencial, híbrido e remoto). */
@@ -20,7 +20,7 @@ const LOCAL_LOCATION = "Maceió, AL";
 const REMOTE_LOCATION = "Brazil";
 
 /**
- * 20 termos locais de Maceió/AL.
+ * 22 termos locais de Maceió/AL.
  *
  * Sem `isRemote` para cobrir presencial, híbrido e remoto. Evitam-se termos
  * genéricos e vagas de nível pleno/sênior; cobrem desenvolvimento júnior e
@@ -48,10 +48,12 @@ const LOCAL_TERMS = [
   "junior software engineer",
   "junior full stack developer",
   "junior frontend developer",
+  "desenvolvedor de software",
+  "estágio em tecnologia",
 ] as const;
 
 /**
- * 80 termos remotos nacionais, com variações em português e inglês de júnior e
+ * 88 termos remotos nacionais, com variações em português e inglês de júnior e
  * estágio (desenvolvedor, full stack, front-end, back-end, React, Node.js,
  * JavaScript, TypeScript, web e engenharia de software). Sem duplicatas.
  */
@@ -136,9 +138,17 @@ const REMOTE_TERMS = [
   "software engineering internship",
   "software engineer intern",
   "developer intern",
+  "software engineer",
+  "react developer",
+  "node.js developer",
+  "javascript developer",
+  "typescript developer",
+  "full stack developer",
+  "frontend developer",
+  "backend developer",
 ] as const;
 
-/** 20 pesquisas locais de Maceió/AL, abertas a presencial, híbrido e remoto. */
+/** 22 pesquisas locais de Maceió/AL, abertas a presencial, híbrido e remoto. */
 export const INDEED_LOCAL_SEARCHES: readonly IndeedJobSource[] =
   LOCAL_TERMS.map(
     (searchTerm): IndeedJobSource => ({
@@ -149,7 +159,7 @@ export const INDEED_LOCAL_SEARCHES: readonly IndeedJobSource[] =
     }),
   );
 
-/** 80 pesquisas remotas disponíveis para candidatos no Brasil. */
+/** 88 pesquisas remotas disponíveis para candidatos no Brasil. */
 export const INDEED_REMOTE_SEARCHES: readonly IndeedJobSource[] =
   REMOTE_TERMS.map(
     (searchTerm): IndeedJobSource => ({
