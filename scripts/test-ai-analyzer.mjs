@@ -85,12 +85,21 @@ test("buildPrompt inclui os dados da vaga e a evidência auxiliar de localizaç�
 
 test("buildPrompt reflete a triagem geográfica como evidência auxiliar", () => {
   const allowed = buildPrompt(job({ location: "Remoto - Brasil" }));
+  // Remoto sem restrição geográfica: presumido elegível (allowed).
+  const allowedNoRestriction = buildPrompt(job({ location: "", remote: true }));
+  // Restrição geográfica explícita: bloqueada.
   const blocked = buildPrompt(
     job({ location: "US residents only", remote: true }),
   );
-  const unknown = buildPrompt(job({ location: "", remote: true }));
+  // Modalidade desconhecida (sem sinal textual nem flag): indefinida.
+  const unknown = buildPrompt(job({ location: "Brazil", remote: false }));
 
   assert.ok(allowed.includes("evidência auxiliar, não é prova absoluta): allowed"));
+  assert.ok(
+    allowedNoRestriction.includes(
+      "evidência auxiliar, não é prova absoluta): allowed",
+    ),
+  );
   assert.ok(blocked.includes("evidência auxiliar, não é prova absoluta): blocked"));
   assert.ok(unknown.includes("evidência auxiliar, não é prova absoluta): unknown"));
 });

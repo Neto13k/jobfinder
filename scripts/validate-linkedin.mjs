@@ -47,7 +47,7 @@ const COLLECT_PARAMS = {
  * lote para horas UTC fixas (sem depender do relógio).
  */
 function validateRotationLocally() {
-  // 1) Dimensões da matriz: 20 locais + 80 remotas (20 lotes de 5).
+  // 1) Dimensões da matriz: 22 locais + 88 remotas (22 lotes de 5).
   assert.equal(LINKEDIN_LOCAL_SEARCHES.length, LINKEDIN_TOTAL_BATCHES);
   assert.equal(
     LINKEDIN_REMOTE_SEARCHES.length,
@@ -79,16 +79,20 @@ function validateRotationLocally() {
 
   // 4) Rotação: cada hora UTC mapeia para um lote fixo de 1 local + 4 remotas.
   const seenBatches = new Set();
+  const seenLocals = new Set();
+  const seenRemotes = new Set();
   for (let hour = 0; hour < LINKEDIN_TOTAL_BATCHES; hour++) {
     const date = new Date(hour * MS_PER_HOUR);
     const batch = selectLinkedInBatch(date);
 
     seenBatches.add(batch.batchNumber);
+    seenLocals.add(batch.local.searchTerm);
     assert.equal(batch.searches.length, 1 + LINKEDIN_REMOTES_PER_BATCH);
     assert.equal(batch.remotes.length, LINKEDIN_REMOTES_PER_BATCH);
     assert.equal(batch.local, LINKEDIN_LOCAL_SEARCHES[batch.batchNumber - 1]);
     assert.equal(batch.searches[0], batch.local);
     for (const remote of batch.remotes) {
+      seenRemotes.add(remote.searchTerm);
       assert.equal(remote.isRemote, true);
       assert.equal(remote.location, REMOTE_LOCATION);
     }
@@ -96,15 +100,20 @@ function validateRotationLocally() {
     // Determinismo: a mesma hora sempre produz o mesmo lote.
     assert.deepEqual(selectLinkedInBatch(date).searches, batch.searches);
 
-    // Ciclo de 20 horas: a hora + 20 repete o mesmo lote.
+    // Ciclo de 22 horas: a hora + 22 repete o mesmo lote.
     const nextCycle = selectLinkedInBatch(
       new Date((hour + LINKEDIN_TOTAL_BATCHES) * MS_PER_HOUR),
     );
     assert.equal(nextCycle.batchNumber, batch.batchNumber);
   }
 
-  // As 20 horas do ciclo cobrem os 20 lotes, uma vez cada.
+  // As 22 horas do ciclo cobrem os 22 lotes, uma vez cada.
   assert.equal(seenBatches.size, LINKEDIN_TOTAL_BATCHES);
+
+  // Cobertura completa: cada termo (local e remoto) é selecionado exatamente
+  // uma vez no ciclo (os termos são únicos, validado no passo 2).
+  assert.equal(seenLocals.size, LINKEDIN_LOCAL_SEARCHES.length);
+  assert.equal(seenRemotes.size, LINKEDIN_REMOTE_SEARCHES.length);
 }
 
 /** Coleta real via `fetchLinkedInJobs`; executada apenas no modo --collect. */
