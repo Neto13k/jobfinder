@@ -2,6 +2,7 @@ import { BOARD_JOB_SOURCES, type JobSource } from "./config/job-sources.js";
 import { fetchAshbyJobs } from "./providers/ashby.js";
 import { BoardTimeoutError } from "./providers/board-http.js";
 import { fetchGreenhouseJobs } from "./providers/greenhouse.js";
+import { fetchInhireJobs } from "./providers/inhire.js";
 import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
@@ -203,6 +204,9 @@ async function fetchJobsFromSource(source: JobSource): Promise<Job[]> {
         break;
       case "ashby":
         jobs = await fetchAshbyJobs(source.identifier);
+        break;
+      case "inhire":
+        jobs = await fetchInhireJobs(source.identifier);
         break;
       case "linkedin":
         jobs = await fetchLinkedInJobs(source);

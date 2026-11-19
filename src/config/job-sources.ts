@@ -1,7 +1,7 @@
 import type { IndeedJobSource } from "./indeed-searches.js";
 
 /** Plataformas de vagas baseadas em quadro (board) público de uma empresa. */
-export type BoardProvider = "greenhouse" | "lever" | "ashby";
+export type BoardProvider = "greenhouse" | "lever" | "ashby" | "inhire";
 
 /** Fonte de vagas de uma empresa em uma plataforma baseada em quadro. */
 export interface BoardJobSource {
@@ -80,4 +80,34 @@ export const BOARD_JOB_SOURCES: readonly BoardJobSource[] = [
   { provider: "greenhouse", identifier: "exadelinc" }, // Exadel
   { provider: "greenhouse", identifier: "appnovation" }, // Appnovation Technologies
   { provider: "greenhouse", identifier: "capco" }, // Capco
+
+  // --- InHire ---
+  // Empresas de tecnologia/software/fintech/dados confirmadas via API pública
+  // (GET /job-posts/public/pages com X-Tenant): resposta HTTP 200 e `tenantName`
+  // coerente com o portal oficial. Empresas fora do perfil (indústria, varejo,
+  // telecom, federação esportiva, agência de marketing) foram rejeitadas.
+  { provider: "inhire", identifier: "celcoin" }, // Celcoin (infratech de pagamentos)
+  { provider: "inhire", identifier: "cappta" }, // Cappta (fintech de pagamentos)
+  { provider: "inhire", identifier: "contabilizei" }, // Contabilizei (contabilidade digital)
+  { provider: "inhire", identifier: "jump" }, // Jump (tecnologia e dados)
+  { provider: "inhire", identifier: "avenue" }, // Avenue (fintech/investimentos)
+  { provider: "inhire", identifier: "eveo" }, // EVEO (cloud privada)
+  { provider: "inhire", identifier: "v360" }, // V360 (fintech de pagamentos)
+  { provider: "inhire", identifier: "programmers" }, // Programmers - AI, Data & Software
+  { provider: "inhire", identifier: "bionexo" }, // Bionexo (healthtech SaaS)
+  { provider: "inhire", identifier: "netrin" }, // Netrin (consultoria de tecnologia)
+  { provider: "inhire", identifier: "neoway" }, // Neoway (dados/analytics)
+  { provider: "inhire", identifier: "olist" }, // Olist (plataforma de e-commerce)
+  { provider: "inhire", identifier: "premiersoft" }, // Premiersoft (fábrica de software)
+  { provider: "inhire", identifier: "radix" }, // Radix (engenharia e tecnologia)
+  { provider: "inhire", identifier: "audaces" }, // Audaces (software para moda)
+  { provider: "inhire", identifier: "cielo" }, // Cielo (tecnologia de pagamentos)
+  { provider: "inhire", identifier: "alelo" }, // Alelo (benefícios/pagamentos)
+  { provider: "inhire", identifier: "pravaler" }, // Pravaler (fintech de crédito educacional)
+  { provider: "inhire", identifier: "alice" }, // Alice (healthtech)
+  { provider: "inhire", identifier: "queropassagem" }, // Quero Passagem (viagens/tecnologia)
+  // Boards válidos com identidade confirmada (`tenantName` igual ao portal), mas
+  // temporariamente sem vagas publicadas; mantidos por serem fontes compatíveis.
+  { provider: "inhire", identifier: "fiap" }, // FIAP (educação em tecnologia)
+  { provider: "inhire", identifier: "livup" }, // Liv Up (foodtech)
 ];

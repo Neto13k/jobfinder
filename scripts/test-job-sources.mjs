@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 const { BOARD_JOB_SOURCES } = await import("../dist/config/job-sources.js");
 
 /** Providers de board efetivamente implementados no pipeline. */
-const SUPPORTED_BOARD_PROVIDERS = ["greenhouse", "lever", "ashby"];
+const SUPPORTED_BOARD_PROVIDERS = ["greenhouse", "lever", "ashby", "inhire"];
 
 /** Identificador usado nas chaves (provider + identificador). */
 const sourceKey = (source) => `${source.provider}:${source.identifier}`;
@@ -31,7 +31,7 @@ test("todos os providers são suportados pelos providers implementados", () => {
     );
   }
 
-  // Os três providers de board devem estar efetivamente representados.
+  // Os providers de board devem estar efetivamente representados.
   const providers = new Set(BOARD_JOB_SOURCES.map((s) => s.provider));
   for (const provider of SUPPORTED_BOARD_PROVIDERS) {
     assert.ok(providers.has(provider), `nenhuma fonte do provider ${provider}`);
@@ -84,8 +84,40 @@ test("as fontes validadas na etapa 8 estão presentes", () => {
   }
 });
 
+test("as fontes InHire validadas na etapa 9 estão presentes", () => {
+  const keys = new Set(BOARD_JOB_SOURCES.map(sourceKey));
+
+  // Empresas confirmadas por sondagem HTTP (tenantName coerente com o portal).
+  const expected = [
+    "inhire:celcoin",
+    "inhire:cappta",
+    "inhire:contabilizei",
+    "inhire:jump",
+    "inhire:programmers",
+    "inhire:bionexo",
+    "inhire:olist",
+    "inhire:premiersoft",
+  ];
+
+  for (const key of expected) {
+    assert.ok(keys.has(key), `fonte InHire esperada ausente: ${key}`);
+  }
+});
+
+test("os boards temporariamente vazios reavaliados estão presentes", () => {
+  const keys = new Set(BOARD_JOB_SOURCES.map(sourceKey));
+
+  // Identidade confirmada por sondagem HTTP (`tenantName` igual ao portal) e
+  // board válido, ainda que momentaneamente sem vagas publicadas.
+  const expected = ["inhire:fiap", "inhire:livup"];
+
+  for (const key of expected) {
+    assert.ok(keys.has(key), `board reavaliado ausente: ${key}`);
+  }
+});
+
 test("a expansão cobre uma quantidade relevante de fontes por provider", () => {
-  const countByProvider = { greenhouse: 0, lever: 0, ashby: 0 };
+  const countByProvider = { greenhouse: 0, lever: 0, ashby: 0, inhire: 0 };
 
   for (const source of BOARD_JOB_SOURCES) {
     countByProvider[source.provider]++;
@@ -95,4 +127,5 @@ test("a expansão cobre uma quantidade relevante de fontes por provider", () => 
   assert.ok(countByProvider.greenhouse >= 20, "Greenhouse abaixo do esperado");
   assert.ok(countByProvider.lever >= 3, "Lever abaixo do esperado");
   assert.ok(countByProvider.ashby >= 8, "Ashby abaixo do esperado");
+  assert.ok(countByProvider.inhire >= 10, "InHire abaixo do esperado");
 });

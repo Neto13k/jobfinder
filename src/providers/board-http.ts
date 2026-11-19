@@ -57,6 +57,8 @@ export function isTimeoutError(error: unknown): boolean {
  * @param url Endpoint do board.
  * @param source Rótulo do provider (ex.: "greenhouse").
  * @param read Lê/valida a resposta; recebe o {@link Response} resolvido.
+ * @param headers Cabeçalhos extras da requisição (ex.: `X-Tenant` da InHire);
+ *   ausente nos providers que não exigem cabeçalho.
  * @returns O valor produzido por `read`.
  * @throws {BoardTimeoutError} Quando a requisição excede o timeout.
  * @throws O erro original de `read` quando não é timeout.
@@ -65,10 +67,12 @@ export async function fetchBoardWithTimeout<T>(
   url: string,
   source: string,
   read: (response: Response) => Promise<T>,
+  headers?: Record<string, string>,
 ): Promise<T> {
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(BOARD_REQUEST_TIMEOUT_MS),
+      ...(headers ? { headers } : {}),
     });
 
     return await read(response);
