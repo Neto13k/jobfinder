@@ -1,3 +1,4 @@
+import { normalize } from "./seniority-filter.js";
 import type { Job } from "../types/job.js";
 
 /** Termos que indicam cargo de desenvolvimento de software. */
@@ -48,12 +49,14 @@ const NON_DEVELOPER_KEYWORDS = [
  */
 export function filterDeveloperJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => {
-    const title = job.title.toLowerCase();
+    // Normaliza título e palavras-chave (NFD, sem acento, minúsculas) para
+    // comparar sem depender da escrita; espaços e pontuação são preservados.
+    const title = normalize(job.title);
 
-    if (NON_DEVELOPER_KEYWORDS.some((term) => title.includes(term))) {
+    if (NON_DEVELOPER_KEYWORDS.some((term) => title.includes(normalize(term)))) {
       return false;
     }
 
-    return DEVELOPER_KEYWORDS.some((term) => title.includes(term));
+    return DEVELOPER_KEYWORDS.some((term) => title.includes(normalize(term)));
   });
 }
