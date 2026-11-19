@@ -1,12 +1,22 @@
 # JobFinder
 
-**Versão 2.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
+**Versão 2.1.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
 
 O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 boards públicos de empresas** (Greenhouse, Lever, Ashby e InHire) e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, usa o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
+> **Escopo desta versão:** a v2.1.0 mantém a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Esta versão consolida a auditoria da v2.0: corrige a elegibilidade geográfica, centraliza as expressões regulares geográficas, normaliza acentos nos filtros de cargo, amplia a política de revisão manual e integra a validação determinística da rotação do LinkedIn ao `npm test`. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.1.0** — seguem no roadmap.
 
-## Novidades da v2.0
+## Novidades da v2.1.0
+
+- **Limite operacional de cinco análises por execução:** o Gemini analisa no máximo **cinco novas vagas por execução** (`JOBFINDER_MAX_ANALYSES`, teto de `5`), com padrão seguro de `1` análise por execução.
+- **Correção da elegibilidade geográfica:** vagas remotas passam a ser aceitas somente com evidência **explícita** de elegibilidade a candidatos residentes no Brasil (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil). A **ausência** de restrição e o sinal `remote: false` **não** são tratados como elegibilidade nem como presencial; casos indefinidos permanecem `unknown`.
+- **Expressões regulares geográficas centralizadas:** os padrões geográficos compartilhados por triagem e priorização foram reunidos em `src/config/geo-patterns.ts` (`location-filter.ts` e `job-priority.ts` importam o mesmo vocabulário), evitando divergência entre módulos.
+- **Normalização de acentos nos filtros:** o filtro de cargo (`filterDeveloperJobs`) normaliza títulos e palavras-chave com Unicode NFD, remoção de diacríticos e minúsculas, tornando a comparação insensível a acentos e maiúsculas.
+- **Política de revisão manual ampliada:** além da decisão `review`, também geram **revisão manual** os casos com localização ou contratação indefinidas (`unknown`). A notificação `compatible` exige decisão `compatible` da IA **e** ambos os critérios `allowed`; qualquer indício indefinido nunca é promovido a elegibilidade confirmada.
+- **Validação determinística da rotação do LinkedIn:** `scripts/validate-linkedin.mjs` passou a validar a matriz de 100 pesquisas e a rotação dos 20 lotes **localmente** e **sem rede**, e foi integrado ao `npm test`. A coleta real é manual e explícita (`node scripts/validate-linkedin.mjs --collect`).
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-19.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+
+### Recursos herdados da v2.0 (mantidos)
 
 - **LinkedIn Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **10 vagas por pesquisa**.
 - **Indeed Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **15 vagas por pesquisa**.
@@ -36,11 +46,11 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
 - Priorização geográfica das vagas, sem excluir oportunidades apenas por terem prioridade baixa.
-- Análise de **no máximo uma nova vaga por execução** na configuração atual (valor padrão de `JOBFINDER_MAX_ANALYSES`, ajustável de `1` a `5`), por meio do Gemini, reaproveitando análises salvas.
+- Análise de vagas com **limite operacional de cinco análises por execução** (`JOBFINDER_MAX_ANALYSES`, padrão `1`, teto `5`), por meio do Gemini, reaproveitando análises salvas.
 - Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
 - Notificações de vagas aprovadas via Telegram, quando habilitadas.
-- Alertas opcionais de **revisão manual** para vagas com localização permitida e contratação não informada, sem apresentá-las como confirmadas.
+- Alertas opcionais de **revisão manual** para vagas possivelmente compatíveis cuja decisão não é confirmada (decisão `review` da IA ou localização/contratação indefinidas), sem apresentá-las como confirmadas.
 - Execução **manual** (local) e **agendada** (GitHub Actions, desativada por padrão), com limite de **uma notificação por execução**.
 - **Sem envio quando não há vagas elegíveis:** se nenhuma vaga passar pelos filtros, pela análise e pela política de notificação (ou se todas já tiverem sido notificadas), **nenhuma mensagem é enviada**.
 
@@ -153,9 +163,10 @@ Para respeitar o limite da API sem perder cobertura:
 A ordem do funil é: **deduplicação → cargo → senioridade → localização → priorização**.
 
 - **Deduplicação:** chave única `source:id`; a mesma vaga vinda de fontes distintas é mantida como registros separados.
-- **Cargo (desenvolvimento):** mantém títulos de desenvolvimento de software (ex.: *developer*, *frontend*, *backend*, *full stack*, *desenvolvedor*, *engenheiro de software*) e **descarta** áreas não técnicas (vendas, marketing, RH/recrutamento) com precedência sobre qualquer termo de tecnologia.
+- **Cargo (desenvolvimento):** mantém títulos de desenvolvimento de software (ex.: *developer*, *frontend*, *backend*, *full stack*, *desenvolvedor*, *engenheiro de software*) e **descarta** áreas não técnicas (vendas, marketing, RH/recrutamento) com precedência sobre qualquer termo de tecnologia. A comparação normaliza acentos e maiúsculas (Unicode NFD + remoção de diacríticos), sem alterar o sentido das palavras-chave.
 - **Senioridade:** remove títulos com senioridade alta por **palavra inteira** (`sênior`, `pleno`, `lead`, `staff`, `principal`, `especialista`/`specialist`, `mid-level`), preservando júnior, estágio, trainee e vagas sem senioridade informada.
-- **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Vagas **indefinidas** são preservadas para a IA avaliar. `remote: true` **não** significa disponibilidade no Brasil; a modalidade é inferida do próprio anúncio, considerando negações e contradições.
+- **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Para vagas **remotas**, a elegibilidade exige evidência **explícita** de que candidatos residentes no Brasil são aceitos (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil); a **ausência** de restrição não conta como elegibilidade. `remote: true` **não** significa disponibilidade no Brasil e `remote: false` **não** confirma presencial — a modalidade é inferida do próprio anúncio, considerando negações e contradições. Vagas **indefinidas** são preservadas para a IA avaliar.
+- **Padrões geográficos centralizados:** as expressões regulares geográficas compartilhadas por `location-filter.ts` e `job-priority.ts` ficam reunidas em `src/config/geo-patterns.ts`, evitando divergência entre triagem e priorização.
 - **Priorização (temporal + geográfica):** ordena sem descartar. 1) **categoria temporal** (≤24h, ≤72h, ≤7d, ≤14d, >14d e, por último, data desconhecida/inválida); 2) **prioridade geográfica** (`HIGH` Maceió ou remoto no Brasil; `MEDIUM` remoto LATAM/global ou localização ambígua; `LOW` restrições/exclusão do Brasil); 3) data de publicação mais recente; 4) ordem original (ordenação estável). Datas ausentes, inválidas ou futuras são tratadas como recência desconhecida.
 
 > Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A análise de IA em `src/services/ai-analyzer.ts` aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL, e contratação CLT ou estágio; informação ausente retorna `unknown` e **nunca** é presumida.
@@ -171,7 +182,7 @@ A coleta do **LinkedIn** e do **Indeed** (via `ts-jobspy@3.0.1`) pode responder 
 
 ## Versionamento das análises
 
-Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION`, em `src/services/ai-analyzer.ts`).
+Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION = "2026-11-19.1"`, em `src/services/ai-analyzer.ts`).
 
 - **Reutilização estrita:** uma análise salva só é reaproveitada quando a `criteriaVersion` for **idêntica** à versão vigente. Análises de versões anteriores — inclusive registros legados, sem versão — são **reanalisadas**.
 - **Histórico cumulativo:** ao reanalisar, a nova análise é **acrescentada**; nenhum resultado anterior é apagado ou alterado. No PostgreSQL, a unicidade é `UNIQUE NULLS NOT DISTINCT (key, criteria_version)` (uma linha por vaga e versão, no máximo uma legada), e a chave primária passa a ser um `id` substituto.
@@ -405,7 +416,7 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
 
 **Critérios gerais de triagem:** priorizar vagas de entrada em desenvolvimento (júnior/estágio) e tecnologias como JavaScript, TypeScript, React, Node.js e PostgreSQL; remoto disponível no Brasil ou presencial/híbrido viável em Maceió/AL; contratação CLT ou estágio. Vagas PJ explícitas ou com localidade bloqueada não devem ser apresentadas como aprovadas. Os filtros e a IA são mecanismos de triagem, **não garantias de elegibilidade**.
 
-**Regra de alerta de revisão manual:** uma análise com decisão `review`, localização `allowed` e contratação `unknown` pode gerar um aviso separado **somente quando explicitamente habilitado**. Localização desconhecida ou bloqueada não satisfaz essa regra.
+**Regra de alerta de revisão manual:** uma análise não bloqueada cuja decisão não seja `compatible` com localização **e** contratação `allowed` pode gerar um aviso separado **somente quando explicitamente habilitado**. São candidatas a revisão as análises com decisão `review` da IA ou com localização/contratação indefinidas (`unknown`). Localização ou contratação **bloqueada**, bem como decisão `incompatible`, **nunca** geram alerta. A notificação `compatible` exige decisão `compatible` **e** ambos os critérios `allowed`; informação indefinida nunca é promovida a elegibilidade confirmada.
 
 ## Fontes configuradas
 
@@ -439,12 +450,12 @@ npm test
 JOBFINDER_RUN_DB_TESTS=true npm run test:db
 ```
 
-`npm test` executa, em sequência, dez suítes locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
+`npm test` executa, em sequência, dez suítes de teste e uma validação determinística, todas locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
 
 | Script | Cobre |
 |---|---|
-| `test-filters.mjs` | filtros de cargo, senioridade e localização |
-| `test-ai-analyzer.mjs` | captura de dados, prompt e schema de resposta |
+| `test-filters.mjs` | filtros de cargo (com normalização de acentos), senioridade e localização |
+| `test-ai-analyzer.mjs` | captura de dados, prompt, schema de resposta e coerência com a política de notificação |
 | `test-analysis-versioning.mjs` | reutilização estrita por `criteria_version` e histórico cumulativo |
 | `test-storage.mjs` | persistência JSON, reserva e propriedade (`reserved_by`), deduplicação |
 | `test-dispatch.mjs` | desfechos do despacho (confirmação, não entregue, resultado incerto, recuperação pendente) |
@@ -453,6 +464,7 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 | `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
 | `test-job-sources.mjs` | integridade da configuração de fontes/boards |
 | `test-process-jobs.mjs` | resiliência do `processJobs` (falha global do Gemini, reuso de análises, limite por tentativas, ausência de persistência/envio em falhas) |
+| `validate-linkedin.mjs` (modo local) | matriz de 100 pesquisas do LinkedIn (20 locais + 80 remotas), rotação de 20 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 20 h, sem rede |
 
 Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL` e `JOBFINDER_RUN_DB_TESTS=true` e só rodam quando você autoriza explicitamente. Eles usam o prefixo `db-test:` e removem suas linhas ao final; sem as variáveis, apenas informam e não tocam no Supabase.
 
@@ -461,7 +473,7 @@ Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL
 - **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
 - **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire e resiliência do pipeline.
 - **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
-- **Validação do provider:** `scripts/validate-linkedin.mjs` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção manual da coleta.
+- **Validação do provider:** `scripts/validate-linkedin.mjs` roda por padrão em **modo local e determinístico** (valida a matriz de 100 pesquisas e a rotação dos 20 lotes, sem rede) e é executado por `npm test`. A coleta real é manual e explícita: `node scripts/validate-linkedin.mjs --collect` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção da coleta.
 
 > **Importante:** essas validações são **isoladas** e verificam a **lógica interna** do projeto. Elas **não** garantem o funcionamento integral em produção: a coleta real depende de `ts-jobspy` e de serviços de terceiros (sujeitos a mudanças de layout, bloqueios, limites e termos de uso), e as integrações com Gemini, Telegram e Supabase dependem de credenciais, cotas e conectividade. A cobertura completa das 200 pesquisas ocorre ao longo de 20 execuções e não é exercitada de uma só vez.
 
@@ -477,6 +489,7 @@ jobfinder/
 ├── src/
 │   ├── config/
 │   │   ├── job-sources.ts             # União de fontes e quadros de vagas
+│   │   ├── geo-patterns.ts            # Expressões regulares geográficas compartilhadas
 │   │   ├── linkedin-searches.ts       # 100 pesquisas do LinkedIn Jobs
 │   │   └── indeed-searches.ts         # 100 pesquisas do Indeed Jobs
 │   ├── db/postgres.ts                 # Pool PostgreSQL com TLS validado
@@ -525,7 +538,7 @@ jobfinder/
 6. Respeitar as cotas e condições das APIs de terceiros. A coleta e a análise exigem conexão à internet e podem estar sujeitas a limites ou cobranças. A coleta via `ts-jobspy` baseia-se em scraping e pode estar sujeita aos termos de uso das plataformas consultadas.
 7. Validar a vaga original antes de realizar qualquer candidatura; o JobFinder não garante disponibilidade, modalidade de contratação ou elegibilidade.
 
-## Limitações conhecidas da v2.0
+## Limitações conhecidas da v2.1.0
 
 - **Não há garantia de entrega exatamente uma vez:** o Telegram e o banco não compartilham transação. A reserva antes do envio reduz duplicidades em condições normais, mas não elimina a possibilidade de envio perdido ou de reserva `pending` após uma falha entre o envio e a confirmação. Essas reservas **não** são reenviadas automaticamente e exigem resolução manual (ver *Recuperação de reservas pendentes*).
 - **Persistência JSON não é compartilhada:** no modo `json`, os históricos ficam apenas na máquina local; o GitHub Actions usa `postgres`.
@@ -539,13 +552,13 @@ jobfinder/
 
 ## Roadmap
 
-### Versão 2.1 — Planejada
+### Versão 2.2 — Planejada
 
 - **Integração de LinkedIn Posts.**
 - **Descoberta de oportunidades divulgadas por recrutadores.**
 - **Estudos de viabilidade, custos e limites de APIs de publicações.**
 
-> **LinkedIn Posts não faz parte da v2.0.** A v2.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada na v2.1, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
+> **LinkedIn Posts não faz parte da v2.1.0.** A v2.1.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada na v2.2, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
 
 Observabilidade e testes de fluxo mais abrangentes também ficam previstos para as próximas versões.
 
@@ -566,4 +579,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos**. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.1.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos**. Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-19.1"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
