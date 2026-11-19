@@ -1,26 +1,34 @@
 # JobFinder
 
-**Versão 2.1.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
+**Versão 2.2.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
 
 O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 boards públicos de empresas** (Greenhouse, Lever, Ashby e InHire) e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, usa o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v2.1.0 mantém a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Esta versão consolida a auditoria da v2.0: corrige a elegibilidade geográfica, centraliza as expressões regulares geográficas, normaliza acentos nos filtros de cargo, amplia a política de revisão manual e integra a validação determinística da rotação do LinkedIn ao `npm test`. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.1.0** — seguem no roadmap.
+> **Escopo desta versão:** a v2.2.0 mantém a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Esta versão adota uma **presunção operacional de elegibilidade** para vagas remotas sem restrições geográficas explícitas, expande a matriz de pesquisas do LinkedIn e do Indeed para **220 pesquisas** (110 por provider, em **22 lotes** com ciclo de **22 horas**) e integra as validações determinísticas do LinkedIn e do Indeed ao `npm test`. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.2.0** — seguem planejadas, sem versão definitiva estabelecida.
 
-## Novidades da v2.1.0
+## Novidades da v2.2.0
+
+- **Presunção operacional de elegibilidade remota:** vagas **remotas sem restrição geográfica explícita** passam a ser classificadas como `allowed` na triagem (presunção operacional de elegibilidade), e não mais como `unknown`. É uma **presunção de triagem**, distinta da **elegibilidade confirmada pelo Gemini**: a IA continua validando a vaga e pode descartá-la. Os bloqueios explícitos são preservados — residência restrita a outro país, exclusão explícita do Brasil e localizações estrangeiras permanecem `blocked`; sinais contraditórios (localização estrangeira com descrição que declara aceitar residentes no Brasil) permanecem `unknown`.
+- **Expansão da matriz de pesquisas:** LinkedIn e Indeed passam a **110 pesquisas cada** (22 locais em Maceió/AL + 88 remotas no Brasil), totalizando **220 pesquisas** (antes 200). Os **200 termos anteriores foram preservados** em ordem e composição; os novos termos foram acrescentados ao final (2 locais e 8 remotos por provider).
+- **Rotação de 22 lotes:** as 110 pesquisas de cada plataforma formam **22 lotes** (1 local + 4 remotas por hora UTC), com ciclo determinístico de **22 horas** (antes 20).
+- **Validações determinísticas do LinkedIn e do Indeed:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` validam localmente (sem rede) as matrizes e a rotação de cada plataforma e foram integrados ao `npm test`.
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-19.2`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+
+## Novidades da v2.1.0 (mantidas)
 
 - **Limite operacional de cinco análises por execução:** o Gemini analisa no máximo **cinco novas vagas por execução** (`JOBFINDER_MAX_ANALYSES`, teto de `5`), com padrão seguro de `1` análise por execução.
-- **Correção da elegibilidade geográfica:** vagas remotas passam a ser aceitas somente com evidência **explícita** de elegibilidade a candidatos residentes no Brasil (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil). A **ausência** de restrição e o sinal `remote: false` **não** são tratados como elegibilidade nem como presencial; casos indefinidos permanecem `unknown`.
+- **Correção da elegibilidade geográfica:** vagas remotas passaram a exigir evidência **explícita** de elegibilidade a candidatos residentes no Brasil (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil), e a **ausência** de restrição não era tratada como elegibilidade. *(Esta regra foi refinada na v2.2.0, que passou a presumir elegibilidade para vagas remotas sem restrição geográfica explícita — ver a seção "Novidades da v2.2.0".)*
 - **Expressões regulares geográficas centralizadas:** os padrões geográficos compartilhados por triagem e priorização foram reunidos em `src/config/geo-patterns.ts` (`location-filter.ts` e `job-priority.ts` importam o mesmo vocabulário), evitando divergência entre módulos.
 - **Normalização de acentos nos filtros:** o filtro de cargo (`filterDeveloperJobs`) normaliza títulos e palavras-chave com Unicode NFD, remoção de diacríticos e minúsculas, tornando a comparação insensível a acentos e maiúsculas.
 - **Política de revisão manual ampliada:** além da decisão `review`, também geram **revisão manual** os casos com localização ou contratação indefinidas (`unknown`). A notificação `compatible` exige decisão `compatible` da IA **e** ambos os critérios `allowed`; qualquer indício indefinido nunca é promovido a elegibilidade confirmada.
-- **Validação determinística da rotação do LinkedIn:** `scripts/validate-linkedin.mjs` passou a validar a matriz de 100 pesquisas e a rotação dos 20 lotes **localmente** e **sem rede**, e foi integrado ao `npm test`. A coleta real é manual e explícita (`node scripts/validate-linkedin.mjs --collect`).
-- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-19.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+- **Validação determinística da rotação do LinkedIn:** `scripts/validate-linkedin.mjs` passou a validar a matriz de pesquisas e a rotação dos lotes **localmente** e **sem rede** (à época, 100 pesquisas em 20 lotes; atualmente 110 em 22), e foi integrado ao `npm test`. A coleta real é manual e explícita (`node scripts/validate-linkedin.mjs --collect`).
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` foi atualizado para `2026-11-19.1` (revisado para `2026-11-19.2` na v2.2.0), disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
 
 ### Recursos herdados da v2.0 (mantidos)
 
-- **LinkedIn Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **10 vagas por pesquisa**.
-- **Indeed Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **100 pesquisas** — 20 locais em Maceió/AL e 80 remotas no Brasil — e limite de **15 vagas por pesquisa**.
-- **Rotação determinística e sem estado:** as 100 pesquisas de cada plataforma são divididas em **20 lotes**; a cada execução são selecionados **5 pesquisas do LinkedIn e 5 do Indeed** (1 local de Maceió e 4 remotas nacionais por plataforma), escolhidas pela hora UTC e sem persistir estado.
+- **LinkedIn Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **110 pesquisas** — 22 locais em Maceió/AL e 88 remotas no Brasil — e limite de **10 vagas por pesquisa**.
+- **Indeed Jobs:** coleta de vagas por termo de busca via `ts-jobspy@3.0.1`, com **110 pesquisas** — 22 locais em Maceió/AL e 88 remotas no Brasil — e limite de **15 vagas por pesquisa**.
+- **Rotação determinística e sem estado:** as 110 pesquisas de cada plataforma são divididas em **22 lotes**; a cada execução são selecionados **5 pesquisas do LinkedIn e 5 do Indeed** (1 local de Maceió e 4 remotas nacionais por plataforma), escolhidas pela hora UTC e sem persistir estado.
 - **Coleta sequencial entre plataformas:** os lotes do LinkedIn e do Indeed rodam **um após o outro**, e cada lote executa **uma pesquisa por vez**, para não concorrerem na mesma sessão da biblioteca `ts-jobspy`.
 - **`patch-package` para `geoId`:** um patch local (`patches/ts-jobspy+3.0.1.patch`) habilita o parâmetro `geoId`, usado para fixar as pesquisas locais do LinkedIn em Maceió/AL.
 - **Mapeamento de falhas por plataforma:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente; falhas de um provider são isoladas e não derrubam as demais fontes.
@@ -117,11 +125,11 @@ As pesquisas do LinkedIn e do Indeed são configuradas em `src/config/linkedin-s
 
 | Plataforma | Pesquisas totais | Locais (Maceió/AL) | Remotas (Brasil) | Limite por pesquisa |
 |---|---|---|---|---|
-| LinkedIn Jobs | 100 | 20 | 80 | 10 vagas |
-| Indeed Jobs | 100 | 20 | 80 | 15 vagas |
+| LinkedIn Jobs | 110 | 22 | 88 | 10 vagas |
+| Indeed Jobs | 110 | 22 | 88 | 15 vagas |
 
-- **Rotação de lotes:** as 100 pesquisas de cada plataforma formam **20 lotes**; cada lote contém **1 pesquisa local de Maceió** e **4 pesquisas remotas nacionais**. A seleção é determinística e **sem estado**: converte a data atual em horas UTC absolutas e aplica módulo 20, então cada hora do calendário mapeia sempre para o mesmo lote e o ciclo se repete a cada 20 horas. As rotações do LinkedIn e do Indeed são independentes.
-- **Por execução:** são executadas **5 pesquisas do LinkedIn e 5 do Indeed** (10 no total). As 200 pesquisas **não** são executadas simultaneamente — a cobertura completa ocorre ao longo do ciclo de 20 horas.
+- **Rotação de lotes:** as 110 pesquisas de cada plataforma formam **22 lotes**; cada lote contém **1 pesquisa local de Maceió** e **4 pesquisas remotas nacionais**. A seleção é determinística e **sem estado**: converte a data atual em horas UTC absolutas e aplica módulo 22, então cada hora do calendário mapeia sempre para o mesmo lote e o ciclo se repete a cada 22 horas. As rotações do LinkedIn e do Indeed são independentes.
+- **Por execução:** são executadas **5 pesquisas do LinkedIn e 5 do Indeed** (10 no total). As 220 pesquisas **não** são executadas simultaneamente — a cobertura completa ocorre ao longo do ciclo de 22 horas.
 - **Coleta sequencial:** os lotes do LinkedIn e do Indeed são executados **um após o outro** e cada lote roda **uma pesquisa por vez**, pois ambos compartilham a mesma biblioteca `ts-jobspy` e pesquisas concorrentes entrariam em conflito.
 - **`geoId` via patch:** as pesquisas locais do LinkedIn fixam a cidade com `geoId` (`102957102` para Maceió/AL), suporte fornecido pelo patch `patches/ts-jobspy+3.0.1.patch`. A versão do `ts-jobspy` fica **fixada exatamente** (`3.0.1`) para garantir a compatibilidade do patch.
 - **Descrição completa:** o provider do LinkedIn busca a descrição completa de cada vaga (`fetchDescription: true`), necessária à análise da IA.
@@ -165,11 +173,11 @@ A ordem do funil é: **deduplicação → cargo → senioridade → localizaçã
 - **Deduplicação:** chave única `source:id`; a mesma vaga vinda de fontes distintas é mantida como registros separados.
 - **Cargo (desenvolvimento):** mantém títulos de desenvolvimento de software (ex.: *developer*, *frontend*, *backend*, *full stack*, *desenvolvedor*, *engenheiro de software*) e **descarta** áreas não técnicas (vendas, marketing, RH/recrutamento) com precedência sobre qualquer termo de tecnologia. A comparação normaliza acentos e maiúsculas (Unicode NFD + remoção de diacríticos), sem alterar o sentido das palavras-chave.
 - **Senioridade:** remove títulos com senioridade alta por **palavra inteira** (`sênior`, `pleno`, `lead`, `staff`, `principal`, `especialista`/`specialist`, `mid-level`), preservando júnior, estágio, trainee e vagas sem senioridade informada.
-- **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Para vagas **remotas**, a elegibilidade exige evidência **explícita** de que candidatos residentes no Brasil são aceitos (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil); a **ausência** de restrição não conta como elegibilidade. `remote: true` **não** significa disponibilidade no Brasil e `remote: false` **não** confirma presencial — a modalidade é inferida do próprio anúncio, considerando negações e contradições. Vagas **indefinidas** são preservadas para a IA avaliar.
+- **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Para vagas **remotas sem restrição geográfica explícita**, a triagem presume **elegibilidade operacional** (`allowed`) — uma presunção de triagem, **não** uma confirmação de disponibilidade no Brasil. Os bloqueios explícitos são preservados: localização estrangeira, restrição de residência a outro país e exclusão explícita do Brasil permanecem `blocked`; sinais contraditórios (localização estrangeira com descrição que declara aceitar residentes no Brasil) permanecem `unknown`. `remote: true` **não** significa disponibilidade no Brasil e `remote: false` **não** confirma presencial — a modalidade é inferida do próprio anúncio, considerando negações e contradições. Vagas **indefinidas** são preservadas para a IA avaliar.
 - **Padrões geográficos centralizados:** as expressões regulares geográficas compartilhadas por `location-filter.ts` e `job-priority.ts` ficam reunidas em `src/config/geo-patterns.ts`, evitando divergência entre triagem e priorização.
 - **Priorização (temporal + geográfica):** ordena sem descartar. 1) **categoria temporal** (≤24h, ≤72h, ≤7d, ≤14d, >14d e, por último, data desconhecida/inválida); 2) **prioridade geográfica** (`HIGH` Maceió ou remoto no Brasil; `MEDIUM` remoto LATAM/global ou localização ambígua; `LOW` restrições/exclusão do Brasil); 3) data de publicação mais recente; 4) ordem original (ordenação estável). Datas ausentes, inválidas ou futuras são tratadas como recência desconhecida.
 
-> Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A análise de IA em `src/services/ai-analyzer.ts` aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL, e contratação CLT ou estágio; informação ausente retorna `unknown` e **nunca** é presumida.
+> Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A classificação geográfica dos filtros (`allowed`) para vagas remotas sem restrição é uma **presunção operacional de elegibilidade**, distinta da **elegibilidade confirmada pelo Gemini**: a análise de IA em `src/services/ai-analyzer.ts` continua validando a vaga (aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL e contratação CLT ou estágio) e pode descartá-la; informação ausente retorna `unknown` e **nunca** é presumida.
 
 ## Tratamento de HTTP 429 (rate limiting)
 
@@ -182,7 +190,7 @@ A coleta do **LinkedIn** e do **Indeed** (via `ts-jobspy@3.0.1`) pode responder 
 
 ## Versionamento das análises
 
-Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION = "2026-11-19.1"`, em `src/services/ai-analyzer.ts`).
+Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION = "2026-11-19.2"`, em `src/services/ai-analyzer.ts`).
 
 - **Reutilização estrita:** uma análise salva só é reaproveitada quando a `criteriaVersion` for **idêntica** à versão vigente. Análises de versões anteriores — inclusive registros legados, sem versão — são **reanalisadas**.
 - **Histórico cumulativo:** ao reanalisar, a nova análise é **acrescentada**; nenhum resultado anterior é apagado ou alterado. No PostgreSQL, a unicidade é `UNIQUE NULLS NOT DISTINCT (key, criteria_version)` (uma linha por vaga e versão, no máximo uma legada), e a chave primária passa a ser um `id` substituto.
@@ -428,14 +436,14 @@ As empresas/boards utilizados são definidos em `src/config/job-sources.ts`, e a
 | InHire | 22 | `celcoin`, `contabilizei`, `olist`, `cielo` |
 | Ashby | 9 | `nubank`, `deel`, `truelogic` |
 | Lever | 4 | `Flex`, `ciandt`, `oowlish` |
-| LinkedIn Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) | — |
-| Indeed Jobs | 100 pesquisas (20 locais em Maceió/AL + 80 remotas no Brasil) | — |
+| LinkedIn Jobs | 110 pesquisas (22 locais em Maceió/AL + 88 remotas no Brasil) | — |
+| Indeed Jobs | 110 pesquisas (22 locais em Maceió/AL + 88 remotas no Brasil) | — |
 
-**Total: 59 boards públicos** (37 em Greenhouse/Lever/Ashby + 22 empresas na InHire) **e 200 pesquisas** (100 do LinkedIn + 100 do Indeed).
+**Total: 59 boards públicos** (37 em Greenhouse/Lever/Ashby + 22 empresas na InHire) **e 220 pesquisas** (110 do LinkedIn + 110 do Indeed).
 
 Cada identificador de board foi confirmado contra o endpoint público do respectivo provider (resposta HTTP 200 com corpo válido) e a identidade da empresa foi conferida no metadado/portal oficial antes de ser adicionada. Boards que responderam erro HTTP, apontaram para empresa sem evidência de contratação no Brasil ou cuja identidade não pôde ser confirmada ficaram de fora. Alguns boards válidos podem estar **temporariamente sem vagas publicadas** e mesmo assim permanecem configurados.
 
-Essas fontes foram usadas para validar os providers e **não garantem oportunidades compatíveis com candidatos residentes no Brasil**. Adicionar uma nova empresa à lista exige confirmar previamente o identificador aceito pela respectiva API. A cobertura completa das pesquisas do LinkedIn e do Indeed ocorre ao longo do ciclo de 20 lotes; cada execução roda apenas 5 pesquisas de cada plataforma.
+Essas fontes foram usadas para validar os providers e **não garantem oportunidades compatíveis com candidatos residentes no Brasil**. Adicionar uma nova empresa à lista exige confirmar previamente o identificador aceito pela respectiva API. A cobertura completa das pesquisas do LinkedIn e do Indeed ocorre ao longo do ciclo de 22 lotes; cada execução roda apenas 5 pesquisas de cada plataforma.
 
 ## Testes e validações realizadas
 
@@ -450,7 +458,7 @@ npm test
 JOBFINDER_RUN_DB_TESTS=true npm run test:db
 ```
 
-`npm test` executa, em sequência, dez suítes de teste e uma validação determinística, todas locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
+`npm test` executa, em sequência, dez suítes de teste e duas validações determinísticas, todas locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
 
 | Script | Cobre |
 |---|---|
@@ -464,18 +472,19 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 | `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
 | `test-job-sources.mjs` | integridade da configuração de fontes/boards |
 | `test-process-jobs.mjs` | resiliência do `processJobs` (falha global do Gemini, reuso de análises, limite por tentativas, ausência de persistência/envio em falhas) |
-| `validate-linkedin.mjs` (modo local) | matriz de 100 pesquisas do LinkedIn (20 locais + 80 remotas), rotação de 20 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 20 h, sem rede |
+| `validate-linkedin.mjs` (modo local) | matriz de 110 pesquisas do LinkedIn (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
+| `validate-indeed.mjs` (modo local) | matriz de 110 pesquisas do Indeed (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 
 Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL` e `JOBFINDER_RUN_DB_TESTS=true` e só rodam quando você autoriza explicitamente. Eles usam o prefixo `db-test:` e removem suas linhas ao final; sem as variáveis, apenas informam e não tocam no Supabase.
 
 **Resultados das validações realizadas:**
 
 - **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
-- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire e resiliência do pipeline.
+- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire, resiliência do pipeline e as matrizes/rotações do LinkedIn e do Indeed.
 - **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
-- **Validação do provider:** `scripts/validate-linkedin.mjs` roda por padrão em **modo local e determinístico** (valida a matriz de 100 pesquisas e a rotação dos 20 lotes, sem rede) e é executado por `npm test`. A coleta real é manual e explícita: `node scripts/validate-linkedin.mjs --collect` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção da coleta.
+- **Validação dos providers:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` rodam por padrão em **modo local e determinístico** (validam as matrizes de 110 pesquisas e a rotação dos 22 lotes de cada plataforma, sem rede) e são executados por `npm test`. Para o LinkedIn, a coleta real é manual e explícita: `node scripts/validate-linkedin.mjs --collect` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção da coleta.
 
-> **Importante:** essas validações são **isoladas** e verificam a **lógica interna** do projeto. Elas **não** garantem o funcionamento integral em produção: a coleta real depende de `ts-jobspy` e de serviços de terceiros (sujeitos a mudanças de layout, bloqueios, limites e termos de uso), e as integrações com Gemini, Telegram e Supabase dependem de credenciais, cotas e conectividade. A cobertura completa das 200 pesquisas ocorre ao longo de 20 execuções e não é exercitada de uma só vez.
+> **Importante:** essas validações são **isoladas** e verificam a **lógica interna** do projeto. Elas **não** garantem o funcionamento integral em produção: a coleta real depende de `ts-jobspy` e de serviços de terceiros (sujeitos a mudanças de layout, bloqueios, limites e termos de uso), e as integrações com Gemini, Telegram e Supabase dependem de credenciais, cotas e conectividade. A cobertura completa das 220 pesquisas ocorre ao longo de 22 execuções e não é exercitada de uma só vez.
 
 ## Estrutura principal
 
@@ -490,8 +499,8 @@ jobfinder/
 │   ├── config/
 │   │   ├── job-sources.ts             # União de fontes e quadros de vagas
 │   │   ├── geo-patterns.ts            # Expressões regulares geográficas compartilhadas
-│   │   ├── linkedin-searches.ts       # 100 pesquisas do LinkedIn Jobs
-│   │   └── indeed-searches.ts         # 100 pesquisas do Indeed Jobs
+│   │   ├── linkedin-searches.ts       # 110 pesquisas do LinkedIn Jobs
+│   │   └── indeed-searches.ts         # 110 pesquisas do Indeed Jobs
 │   ├── db/postgres.ts                 # Pool PostgreSQL com TLS validado
 │   ├── providers/
 │   │   ├── board-http.ts              # Requisições a boards com timeout (BoardTimeoutError)
@@ -511,8 +520,8 @@ jobfinder/
 │   │   ├── seniority-filter.ts
 │   │   ├── location-filter.ts
 │   │   ├── job-priority.ts            # Priorização temporal e geográfica
-│   │   ├── linkedin-search-rotation.ts # Rotação dos 20 lotes do LinkedIn
-│   │   ├── indeed-search-rotation.ts   # Rotação dos 20 lotes do Indeed
+│   │   ├── linkedin-search-rotation.ts # Rotação dos 22 lotes do LinkedIn
+│   │   ├── indeed-search-rotation.ts   # Rotação dos 22 lotes do Indeed
 │   │   ├── notification-policy.ts
 │   │   ├── notification-dispatch.ts   # Reserva + envio + confirmação/liberação
 │   │   └── telegram.ts
@@ -538,27 +547,27 @@ jobfinder/
 6. Respeitar as cotas e condições das APIs de terceiros. A coleta e a análise exigem conexão à internet e podem estar sujeitas a limites ou cobranças. A coleta via `ts-jobspy` baseia-se em scraping e pode estar sujeita aos termos de uso das plataformas consultadas.
 7. Validar a vaga original antes de realizar qualquer candidatura; o JobFinder não garante disponibilidade, modalidade de contratação ou elegibilidade.
 
-## Limitações conhecidas da v2.1.0
+## Limitações conhecidas da v2.2.0
 
 - **Não há garantia de entrega exatamente uma vez:** o Telegram e o banco não compartilham transação. A reserva antes do envio reduz duplicidades em condições normais, mas não elimina a possibilidade de envio perdido ou de reserva `pending` após uma falha entre o envio e a confirmação. Essas reservas **não** são reenviadas automaticamente e exigem resolução manual (ver *Recuperação de reservas pendentes*).
 - **Persistência JSON não é compartilhada:** no modo `json`, os históricos ficam apenas na máquina local; o GitHub Actions usa `postgres`.
 - **Atraso do agendamento:** execuções do GitHub Actions podem ocorrer com atraso e não em tempo real.
-- **Cobertura por execução:** apenas 5 pesquisas do LinkedIn e 5 do Indeed rodam por execução; a cobertura completa das 200 pesquisas depende do ciclo de 20 horas. As pesquisas **não** são executadas simultaneamente.
+- **Cobertura por execução:** apenas 5 pesquisas do LinkedIn e 5 do Indeed rodam por execução; a cobertura completa das 220 pesquisas depende do ciclo de 22 horas. As pesquisas **não** são executadas simultaneamente.
 - **Dependência de scraping:** a coleta das vagas do LinkedIn e do Indeed depende da `ts-jobspy@3.0.1` e do patch local (`geoId`); mudanças nas plataformas ou atualizações da biblioteca podem exigir ajustes. A versão fica fixada exatamente para preservar a compatibilidade do patch.
-- **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas; `remote: true` não significa disponibilidade no Brasil.
+- **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas. A elegibilidade presumida para vagas remotas sem restrição geográfica explícita é uma **presunção de triagem**, e `remote: true` **não** significa disponibilidade no Brasil.
 - **Uma mensagem por execução:** oportunidades aprovadas adicionais ficam pendentes para execuções seguintes.
 - **Risco residual de tempo de execução:** o workflow do GitHub Actions tem `timeout-minutes: 10`, mas **não há garantia de duração máxima do pipeline**. Em cenários de alta latência ou volume elevado — sobretudo na InHire, em que cada vaga exige uma requisição de detalhe adicional — a execução pode se aproximar ou ultrapassar esse teto e ser interrompida pelo próprio Actions. As vagas já coletadas e as análises já persistidas são preservadas, e o restante fica para a próxima execução; contudo, a interrupção externa pode ocorrer sem que o pipeline finalize e registre um resumo.
 - **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs ou Indeed Jobs) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
 
 ## Roadmap
 
-### Versão 2.2 — Planejada
+### Próximas versões (planejadas)
 
 - **Integração de LinkedIn Posts.**
 - **Descoberta de oportunidades divulgadas por recrutadores.**
 - **Estudos de viabilidade, custos e limites de APIs de publicações.**
 
-> **LinkedIn Posts não faz parte da v2.1.0.** A v2.1.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada na v2.2, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
+> **LinkedIn Posts não faz parte da v2.2.0** e permanece **planejado, sem versão definitiva estabelecida**. A v2.2.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada em versão futura, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
 
 Observabilidade e testes de fluxo mais abrangentes também ficam previstos para as próximas versões.
 
@@ -579,4 +588,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v2.1.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos**. Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-19.1"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos** e **220 pesquisas** (110 do LinkedIn + 110 do Indeed). Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-19.2"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.

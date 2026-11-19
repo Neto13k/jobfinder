@@ -1,6 +1,6 @@
 {
   "name": "jobfinder",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Bot de busca de vagas de tecnologia que utiliza APIs e inteligência artificial para identificar oportunidades compatíveis com o perfil profissional e enviar notificações pelo Telegram.",
   "main": "dist/index.js",
   "scripts": {

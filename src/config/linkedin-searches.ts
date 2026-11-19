@@ -42,9 +42,11 @@ const LOCAL_TERMS = [
 ] as const;
 
 /**
- * 88 termos remotos nacionais, com variações em português e inglês de júnior e
+ * 88 termos remotos nacionais: variações em português e inglês de júnior e
  * estágio (desenvolvedor, full stack, front-end, back-end, React, Node.js,
- * JavaScript, TypeScript, web e estágios). Sem duplicatas.
+ * JavaScript, TypeScript e web) e também termos de cargo sem senioridade
+ * explícita (ex.: "software engineer", "react developer"), que dependem da
+ * triagem de senioridade posterior. Sem duplicatas.
  */
 const REMOTE_TERMS = [
   "desenvolvedor júnior",

@@ -30,4 +30,4 @@ Serviços e regras de negócio do pipeline.
 - `rate-limit.ts` — detecção de HTTP 429 (`RateLimitError`, `withRateLimitGuard`,
   `collectSearchBatch`) e interrupção parcial preservando vagas.
 - `linkedin-search-rotation.ts` / `indeed-search-rotation.ts` — rotação
-  determinística e sem estado dos 20 lotes de pesquisas.
+  determinística e sem estado dos 22 lotes de pesquisas (ciclo de 22 horas).

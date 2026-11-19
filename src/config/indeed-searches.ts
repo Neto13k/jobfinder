@@ -23,9 +23,9 @@ const REMOTE_LOCATION = "Brazil";
  * 22 termos locais de Maceió/AL.
  *
  * Sem `isRemote` para cobrir presencial, híbrido e remoto. Evitam-se termos
- * genéricos e vagas de nível pleno/sênior; cobrem desenvolvimento júnior e
- * estágio em full stack, front-end, back-end, React, Node.js, TypeScript,
- * JavaScript e engenharia de software.
+ * genéricos e vagas de nível pleno/sênior; cobrem desenvolvimento júnior,
+ * estágio e cargos de software sem senioridade explícita (ex.: "desenvolvedor
+ * de software").
  */
 const LOCAL_TERMS = [
   "desenvolvedor júnior",
@@ -53,9 +53,12 @@ const LOCAL_TERMS = [
 ] as const;
 
 /**
- * 88 termos remotos nacionais, com variações em português e inglês de júnior e
+ * 88 termos remotos nacionais: variações em português e inglês de júnior e
  * estágio (desenvolvedor, full stack, front-end, back-end, React, Node.js,
- * JavaScript, TypeScript, web e engenharia de software). Sem duplicatas.
+ * JavaScript, TypeScript, web e engenharia de software) e também termos de
+ * cargo sem senioridade explícita (ex.: "software engineer", "react
+ * developer"), que dependem da triagem de senioridade posterior. Sem
+ * duplicatas.
  */
 const REMOTE_TERMS = [
   "desenvolvedor júnior",
