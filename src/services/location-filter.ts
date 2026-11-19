@@ -1,3 +1,4 @@
+import { BRAZIL_EXCLUSION, ELIGIBLE_AREA, ELIGIBLE_REGION, TARGET_CITY } from "../config/geo-patterns.js";
 import type { Job } from "../types/job.js";
 
 export type JobLocation = "allowed" | "blocked" | "unknown";
@@ -22,16 +23,6 @@ const NEGATION_BEFORE =
 
 // Negação logo depois do sinal (ex.: "remote is not available").
 const NEGATION_AFTER = /^[^.;!?]{0,15}\b(?:not|nao|indisponivel|unavailable)\b/;
-
-// Cidade aceita para vagas presenciais e híbridas.
-const TARGET_CITY = /\bmaceio\b/;
-
-// Regiões que incluem explicitamente o Brasil. Fonte única da expressão,
-// reutilizada ao avaliar alternativas geográficas em exigências de residência.
-const ELIGIBLE_AREA =
-  "brazil|brasil|latam|latin america|america latina|worldwide|global|anywhere";
-
-const ELIGIBLE_REGION = new RegExp(`\\b(?:${ELIGIBLE_AREA})\\b`);
 
 // Localidades claramente estrangeiras: países, regiões e cidades frequentes nos
 // anúncios. A mera menção na descrição NÃO bloqueia; estes termos só pesam na
@@ -87,10 +78,6 @@ const FOREIGN_ONLY = new RegExp(
     ")" +
     `(?![^.;!?]*\\b(?:${ELIGIBLE_AREA})\\b)`,
 );
-
-// Exclusão explícita de candidatos residentes no Brasil (incompatível).
-const BRAZIL_EXCLUSION =
-  /\b(?:excluding|except|without)\s+(?:the\s+)?(?:brazil|brasil)\b|\b(?:brazil|brasil)\s+(?:excluded|not\s+available|not\s+eligible)\b|\bnot\s+available\s+in\s+(?:the\s+)?(?:brazil|brasil)\b|\b(?:exceto|excluindo|sem)\s+(?:o\s+)?(?:brasil|brazil)\b|\b(?:brasil|brazil)\s+(?:excluido|excluida|indisponivel)\b|\bnao\s+disponivel\s+(?:no|em|para)?\s*(?:o\s+)?(?:brasil|brazil)\b/;
 
 // Estados e principais cidades brasileiras: reconhecem vagas remotas no Brasil
 // mesmo sem as palavras "Brazil"/"Brasil" na localização. Não inclui siglas de
@@ -160,9 +147,9 @@ const LOCATION_FILLER =
   /\b(?:e|ou|and|or|the|of|in|at|em|no|na|nos|nas|de|do|da|dos|das|a|o|as|os)\b/g;
 
 // Termos de localidade compatível. Removidos do local exigido para isolar uma
-// eventual localidade específica (ex.: "Brasil ou São Paulo").
-const ELIGIBLE_PLACE =
-  /\b(?:brazil|brasil|latam|latin america|america latina|worldwide|global|anywhere|maceio)\b/g;
+// eventual localidade específica (ex.: "Brasil ou São Paulo"). Deriva da área
+// elegível compartilhada, acrescida da cidade-alvo.
+const ELIGIBLE_PLACE = new RegExp(`\\b(?:${ELIGIBLE_AREA}|maceio)\\b`, "g");
 
 // Normaliza acentos, espaços e letras maiúsculas.
 function normalize(text: string): string {

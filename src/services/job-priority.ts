@@ -1,3 +1,4 @@
+import { BRAZIL, BRAZIL_EXCLUSION, BROAD_REGION, TARGET_CITY } from "../config/geo-patterns.js";
 import type { Job } from "../types/job.js";
 
 // Menor valor = maior prioridade (usado como chave de ordenação).
@@ -7,16 +8,6 @@ const LOW = 2;
 
 // Modalidade remota indicada no texto da localização.
 const REMOTE = /\b(remote|remoto|home\s?office|teletrabalho)\b/;
-
-// Regiões amplas que incluem o Brasil ou permanecem em avaliação.
-const BROAD_REGION =
-  /\b(latam|latin america|america latina|global|worldwide|anywhere)\b/;
-
-// Cidade-alvo para vagas presenciais ou híbridas.
-const TARGET_CITY = /\bmaceio\b/;
-
-// Brasil explícito na localização.
-const BRAZIL = /\b(brazil|brasil)\b/;
 
 // Países/regiões estrangeiros usados nos padrões abaixo.
 const FOREIGN =
@@ -31,16 +22,6 @@ const FOREIGN_RESTRICTION = new RegExp(
 
 // Localidade claramente estrangeira.
 const FOREIGN_LOCATION = new RegExp(`\\b(?:${FOREIGN})\\b`);
-
-// Exclusão explícita de candidatos brasileiros.
-const BRAZIL_EXCLUSION = new RegExp(
-  `\\b(?:excluding|except|without)\\s+(?:the\\s+)?(?:brazil|brasil)\\b` +
-    `|\\b(?:brazil|brasil)\\s+(?:excluded|not\\s+available|not\\s+eligible)\\b` +
-    `|\\bnot\\s+available\\s+in\\s+(?:the\\s+)?(?:brazil|brasil)\\b` +
-    `|\\b(?:exceto|excluindo|sem)\\s+(?:o\\s+)?(?:brasil|brazil)\\b` +
-    `|\\b(?:brasil|brazil)\\s+(?:excluido|excluida|indisponivel)\\b` +
-    `|\\bnao\\s+disponivel\\s+(?:no|em|para)?\\s*(?:o\\s+)?(?:brasil|brazil)\\b`,
-);
 
 /** Normaliza acentos, espaços e letras maiúsculas. */
 function normalize(text: string): string {
