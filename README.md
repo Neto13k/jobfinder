@@ -12,7 +12,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Expansão da matriz de pesquisas:** LinkedIn e Indeed passam a **110 pesquisas cada** (22 locais em Maceió/AL + 88 remotas no Brasil), totalizando **220 pesquisas** (antes 200). Os **200 termos anteriores foram preservados** em ordem e composição; os novos termos foram acrescentados ao final (2 locais e 8 remotos por provider).
 - **Rotação de 22 lotes:** as 110 pesquisas de cada plataforma formam **22 lotes** (1 local + 4 remotas por hora UTC), com ciclo determinístico de **22 horas** (antes 20).
 - **Validações determinísticas do LinkedIn e do Indeed:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` validam localmente (sem rede) as matrizes e a rotação de cada plataforma e foram integrados ao `npm test`.
-- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-19.2`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-20.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
 
 ## Novidades da v2.1.0 (mantidas)
 
@@ -22,7 +22,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Normalização de acentos nos filtros:** o filtro de cargo (`filterDeveloperJobs`) normaliza títulos e palavras-chave com Unicode NFD, remoção de diacríticos e minúsculas, tornando a comparação insensível a acentos e maiúsculas.
 - **Política de revisão manual ampliada:** além da decisão `review`, também geram **revisão manual** os casos com localização ou contratação indefinidas (`unknown`). A notificação `compatible` exige decisão `compatible` da IA **e** ambos os critérios `allowed`; qualquer indício indefinido nunca é promovido a elegibilidade confirmada.
 - **Validação determinística da rotação do LinkedIn:** `scripts/validate-linkedin.mjs` passou a validar a matriz de pesquisas e a rotação dos lotes **localmente** e **sem rede** (à época, 100 pesquisas em 20 lotes; atualmente 110 em 22), e foi integrado ao `npm test`. A coleta real é manual e explícita (`node scripts/validate-linkedin.mjs --collect`).
-- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` foi atualizado para `2026-11-19.1` (revisado para `2026-11-19.2` na v2.2.0), disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` foi atualizado para `2026-11-19.1` (revisado para `2026-11-20.1` na v2.2.0), disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
 
 ### Recursos herdados da v2.0 (mantidos)
 
@@ -106,6 +106,7 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `TELEGRAM_CHAT_ID` | Chat de destino | Necessário para enviar mensagens |
 | `JOBFINDER_STORAGE` | Backend de histórico: `json` ou `postgres` | `json` |
 | `JOBFINDER_MAX_ANALYSES` | Número máximo de novas análises por execução | `1` (teto de `5`) |
+| `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** do GitHub Actions | `false` |
@@ -177,7 +178,7 @@ A ordem do funil é: **deduplicação → cargo → senioridade → localizaçã
 - **Padrões geográficos centralizados:** as expressões regulares geográficas compartilhadas por `location-filter.ts` e `job-priority.ts` ficam reunidas em `src/config/geo-patterns.ts`, evitando divergência entre triagem e priorização.
 - **Priorização (pontuação 0–100):** ordena sem descartar, somando cinco critérios: **stack (35)** — JavaScript, TypeScript, React, Node.js, Express e PostgreSQL, distinguindo requisito obrigatório, diferencial e menção incidental; **senioridade (30)** — prioriza júnior e estágio; **localização (20)** — prioriza remoto no Brasil e, em seguida, presencial/híbrido em Maceió/AL; **recência (10)** — favorece publicações recentes sem excluir vagas sem data; **contratação (5)** — favorece CLT e estágio confirmados. Informações desconhecidas recebem pontuação neutra e **nunca** causam exclusão. Desempate por publicação mais recente e, por fim, ordem original (ordenação estável). Datas ausentes, inválidas ou futuras recebem pontuação neutra de recência.
 
-> Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A classificação geográfica dos filtros (`allowed`) para vagas remotas sem restrição é uma **presunção operacional de elegibilidade**, distinta da **elegibilidade confirmada pelo Gemini**: a análise de IA em `src/services/ai-analyzer.ts` continua validando a vaga (aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL e contratação CLT ou estágio) e pode descartá-la; informação ausente retorna `unknown` e **nunca** é presumida.
+> Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A classificação geográfica dos filtros (`allowed`) para vagas remotas sem restrição é uma **presunção operacional de elegibilidade**, distinta da **elegibilidade confirmada pelo Gemini**: a análise de IA em `src/services/ai-analyzer.ts` avalia **quatro critérios independentes** (senioridade, tecnologias, localização e contratação), classificando cada um como `allowed`, `blocked` ou `unknown`, e **deriva** a decisão deles (qualquer `blocked` ⇒ `incompatible`; qualquer `unknown` ⇒ `review`; todos `allowed` ⇒ `compatible`). Ela aceita júnior/estágio/trainee, a stack de desenvolvimento (JavaScript, TypeScript, React, Node.js, Express, Next.js, HTML, CSS, Sass, REST e PostgreSQL) e contratação CLT ou estágio — inclusive **CLT oferecida como alternativa real ao PJ**; bloqueia funções alheias ao desenvolvimento; e pode descartar a vaga. Informação ausente retorna `unknown` e **nunca** é presumida.
 
 ## Tratamento de HTTP 429 (rate limiting)
 
@@ -190,9 +191,10 @@ A coleta do **LinkedIn** e do **Indeed** (via `ts-jobspy@3.0.1`) pode responder 
 
 ## Versionamento das análises
 
-Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION = "2026-11-19.2"`, em `src/services/ai-analyzer.ts`).
+Cada análise do Gemini é vinculada a uma **versão centralizada de critérios** (`ANALYSIS_CRITERIA_VERSION = "2026-11-20.1"`, em `src/services/ai-analyzer.ts`).
 
 - **Reutilização estrita:** uma análise salva só é reaproveitada quando a `criteriaVersion` for **idêntica** à versão vigente. Análises de versões anteriores — inclusive registros legados, sem versão — são **reanalisadas**.
+- **Histórico legado preservado:** registros anteriores aos quatro critérios (sem `seniorityStatus`/`technologiesStatus`) continuam legíveis; os critérios ausentes são normalizados como `unknown` na leitura, sem reutilizar a análise nem alterar a decisão ou a versão originais. Valores **presentes porém inválidos** continuam sendo rejeitados.
 - **Histórico cumulativo:** ao reanalisar, a nova análise é **acrescentada**; nenhum resultado anterior é apagado ou alterado. No PostgreSQL, a unicidade é `UNIQUE NULLS NOT DISTINCT (key, criteria_version)` (uma linha por vaga e versão, no máximo uma legada), e a chave primária passa a ser um `id` substituto.
 - **Notificadas não são reanalisadas:** uma vaga já notificada (ou reservada) **não** consome cota do Gemini, mesmo após mudança de versão de critérios.
 - **Incrementar a versão** sempre que as regras do prompt ou o schema da resposta mudarem, para disparar a reanálise.
@@ -371,6 +373,7 @@ Em **Settings → Secrets and variables → Actions → Variables**, crie confor
 |---|---|---|
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** | `false` |
 | `JOBFINDER_MAX_ANALYSES` | Novas análises por execução (1–5) | `1` |
+| `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Habilita envios reais | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Habilita avisos de revisão | `false` |
 
@@ -422,7 +425,7 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
  (mesma execução)  (nova tentativa)  (sem reenvio)
 ```
 
-**Critérios gerais de triagem:** priorizar vagas de entrada em desenvolvimento (júnior/estágio) e tecnologias como JavaScript, TypeScript, React, Node.js e PostgreSQL; remoto disponível no Brasil ou presencial/híbrido viável em Maceió/AL; contratação CLT ou estágio. Vagas PJ explícitas ou com localidade bloqueada não devem ser apresentadas como aprovadas. Os filtros e a IA são mecanismos de triagem, **não garantias de elegibilidade**.
+**Critérios gerais de triagem:** priorizar vagas de entrada em desenvolvimento (júnior/estágio) e tecnologias como JavaScript, TypeScript, React, Node.js, Express, Next.js, HTML, CSS, Sass, REST e PostgreSQL; remoto disponível no Brasil ou presencial/híbrido viável em Maceió/AL; contratação CLT ou estágio (aceitando CLT quando oferecida como alternativa real ao PJ). Vagas PJ exclusivas, funções alheias ao desenvolvimento ou com localidade bloqueada não devem ser apresentadas como aprovadas. Os filtros e a IA são mecanismos de triagem, **não garantias de elegibilidade**.
 
 **Regra de alerta de revisão manual:** uma análise não bloqueada cuja decisão não seja `compatible` com localização **e** contratação `allowed` pode gerar um aviso separado **somente quando explicitamente habilitado**. São candidatas a revisão as análises com decisão `review` da IA ou com localização/contratação indefinidas (`unknown`). Localização ou contratação **bloqueada**, bem como decisão `incompatible`, **nunca** geram alerta. A notificação `compatible` exige decisão `compatible` **e** ambos os critérios `allowed`; informação indefinida nunca é promovida a elegibilidade confirmada.
 
@@ -588,4 +591,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v2.2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos** e **220 pesquisas** (110 do LinkedIn + 110 do Indeed). Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-19.2"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos** e **220 pesquisas** (110 do LinkedIn + 110 do Indeed). Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-20.1"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.

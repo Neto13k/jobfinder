@@ -54,6 +54,8 @@ function analysis(overrides) {
     decision: "compatible",
     score: 80,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
     ...overrides,
@@ -70,6 +72,8 @@ function record(key, overrides) {
     decision: "compatible",
     score: 80,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
     analyzedAt: "2026-11-18T12:00:00.000Z",
@@ -174,6 +178,48 @@ test("registro legado com versão nula não é reutilizado", async () => {
 
     assert.equal((await history.getAnalyzedJob(target)).criteriaVersion, null);
     assert.equal(await history.getReusableAnalysis(target), undefined);
+  });
+});
+
+test("registro legado sem os novos critérios é normalizado como unknown", async () => {
+  await withTempDir(async () => {
+    const target = job({ id: "legacy-criteria-1" });
+    const key = dedup.generateJobKey(target);
+
+    // Registro gravado por uma versão anterior, sem seniorityStatus nem
+    // technologiesStatus (critérios introduzidos na TASK-05).
+    const legacy = record(key, { criteriaVersion: "2026-11-18.0" });
+    delete legacy.seniorityStatus;
+    delete legacy.technologiesStatus;
+    await writeHistory([legacy]);
+
+    // A leitura preserva a decisão e a versão originais e normaliza apenas os
+    // critérios ausentes como "unknown".
+    const stored = await history.getAnalyzedJob(target);
+    assert.equal(stored.seniorityStatus, "unknown");
+    assert.equal(stored.technologiesStatus, "unknown");
+    assert.equal(stored.locationStatus, "allowed");
+    assert.equal(stored.contractStatus, "allowed");
+    assert.equal(stored.decision, "compatible");
+    assert.equal(stored.criteriaVersion, "2026-11-18.0");
+
+    // Nenhuma análise histórica é promovida à versão vigente.
+    assert.equal(await history.getReusableAnalysis(target), undefined);
+  });
+});
+
+test("registro com critério presente porém inválido é rejeitado", async () => {
+  await withTempDir(async () => {
+    const target = job({ id: "invalid-status-1" });
+    const key = dedup.generateJobKey(target);
+
+    // Valor presente mas fora do domínio: a validação não é enfraquecida.
+    await writeHistory([record(key, { technologiesStatus: "talvez" })]);
+
+    await assert.rejects(
+      () => history.getAnalyzedJob(target),
+      /formato inesperado/,
+    );
   });
 });
 

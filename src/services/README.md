@@ -14,11 +14,20 @@ Serviços e regras de negócio do pipeline.
 
 ## Análise e histórico
 
-- `ai-analyzer.ts` — análise via Google Gemini com resposta JSON estruturada;
-  `ANALYSIS_CRITERIA_VERSION` versiona os critérios e `classifyGeminiError`
-  categoriza as falhas.
+- `ai-analyzer.ts` — análise via Google Gemini com resposta JSON estruturada.
+  Avalia **quatro critérios independentes** — senioridade, tecnologias,
+  localização e contratação — e classifica cada um como `allowed`, `blocked` ou
+  `unknown`. A decisão final é **derivada** dos critérios (qualquer `blocked` ⇒
+  `incompatible`; qualquer `unknown` ⇒ `review`; todos `allowed` ⇒
+  `compatible`), nunca aceita da IA. `ANALYSIS_CRITERIA_VERSION` versiona os
+  critérios e `classifyGeminiError` categoriza as falhas. O orçamento da
+  descrição enviada à IA é configurável por
+  `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` (padrão de 4000 caracteres, apenas
+  inteiro positivo), preservando o início, um trecho do meio e o fim do anúncio.
 - `analysis-history.ts` — histórico de análises; reutiliza somente a versão
-  vigente de critérios e preserva versões anteriores.
+  vigente de critérios e preserva versões anteriores. Registros legados, sem os
+  critérios `seniorityStatus`/`technologiesStatus`, são lidos normalizando-os
+  como `unknown`, sem reutilizá-los nem alterar decisões históricas.
 - `deduplication.ts` — chave `source:id`, reserva e histórico de notificações.
 - `storage.ts` — seleção explícita do backend (`json` ou `postgres`), sem fallback
   silencioso.

@@ -60,6 +60,8 @@ function analysis(overrides) {
     decision: "compatible",
     score: 80,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
     ...overrides,
