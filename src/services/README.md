@@ -69,6 +69,30 @@ Serviços e regras de negócio do pipeline.
 - `storage.ts` — seleção explícita do backend (`json` ou `postgres`), sem fallback
   silencioso.
 
+## Fila de pendências
+
+- `pending-jobs.ts` — fila persistente de vagas **elegíveis** não concluídas numa
+  execução, recuperadas nas seguintes **mesmo sem nova coleta** pelas fontes.
+  Motivos: `analysis_limit`, `gemini_unavailable` (falha da IA que exige nova
+  tentativa — indisponibilidade, rede, autenticação, cota/tokens/orçamento/tempo,
+  resposta vazia/estruturalmente inválida do lote ou vaga sem resultado válido,
+  incluindo as vagas do **próprio lote que falhou**) e `notification_limit`. Guarda
+  o objeto `Job` **completo** (`data/pending-jobs.json` no JSON; `public.pending_jobs`
+  no PostgreSQL, migração `20261121000000_create_pending_jobs.sql`); a integridade
+  é validada pela **mesma** função nos dois backends (chave `source:id` coerente,
+  motivo permitido, `Job` válido e datas válidas) e fila vazia/corrompida **lança**
+  (sem fallback silencioso; nada é apagado). No JSON a gravação é **atômica**
+  (temporário + `rename`, sem sobrescrever a fila original quando falha).
+  `loadPendingJobs` exclui — registrando, não em silêncio — as pendências já
+  **notificadas/reservadas** e as **obsoletas (TTL)** (`JOBFINDER_PENDING_JOB_TTL_DAYS`,
+  padrão 7). `savePendingJobs` reconcilia a fila (mantém as pendentes + remove as
+  resolvidas), aplica o teto `JOBFINDER_PENDING_MAX_JOBS` (padrão 200, descartando
+  as mais antigas) e é **serializada** — advisory lock transacional no PostgreSQL e
+  `withStorageLock` no JSON — com a remoção das chaves resolvidas protegida por
+  `updatedAt`/`updated_at` anterior ao início da execução (`runStartedAtIso`),
+  evitando perdas/duplicações entre execuções concorrentes. Desligável por
+  `JOBFINDER_PENDING_JOBS_ENABLED` (padrão `true`).
+
 ## Notificação e utilidades
 
 - `notification-policy.ts` — classifica a vaga (`compatible`, `manual_review`).

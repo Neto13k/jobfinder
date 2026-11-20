@@ -50,6 +50,12 @@ import {
   collectSearchBatch,
   RateLimitError,
 } from "./services/rate-limit.js";
+import {
+  loadPendingJobs,
+  resolvePendingJobsConfig,
+  savePendingJobs,
+  type PendingJobInput,
+} from "./services/pending-jobs.js";
 import { filterBySeniority } from "./services/seniority-filter.js";
 import {
   LINKEDIN_TOTAL_BATCHES,
@@ -158,6 +164,15 @@ export interface RunSummary {
   // Vagas sem análise porque a IA ficou indisponível nesta execução (falha
   // global), diferenciadas do limite de tentativas e das falhas em si.
   unanalyzedByGemini: number;
+  /**
+   * Vagas que ficaram pendentes nesta execução, na ordem de prioridade, para
+   * persistência pelo pipeline: barradas pelo limite de análises, pela
+   * indisponibilidade da IA (inclui orçamento de tempo) ou, quando já
+   * analisadas e notificáveis, pelo limite de notificações da execução. Não
+   * inclui vagas notificadas, já reservadas, incompatíveis ou deixadas de lado
+   * porque as notificações estão desativadas.
+   */
+  pendingJobs: PendingJobInput[];
 }
 
 /** Motivo pelo qual uma vaga analisada não gerou notificação. */
@@ -432,6 +447,23 @@ export async function processJobs(
     unanalyzedByLimit: 0,
     unscannedByLimit: 0,
     unanalyzedByGemini: 0,
+    pendingJobs: [],
+  };
+
+  // Vagas a persistir como pendentes, na ordem de prioridade em que ficam
+  // pendentes, sem repetir a mesma vaga (chave "source:id").
+  const pendingJobs = summary.pendingJobs;
+  const pendingKeys = new Set<string>();
+
+  /** Marca a vaga como pendente desta execução, sem duplicar por chave. */
+  const markPending = (job: Job, reason: PendingJobInput["reason"]): void => {
+    const key = generateJobKey(job);
+    if (pendingKeys.has(key)) {
+      return;
+    }
+
+    pendingKeys.add(key);
+    pendingJobs.push({ job, reason });
   };
 
   // Contagem por motivo de não notificação, para o resumo do funil.
@@ -613,6 +645,15 @@ export async function processJobs(
           `categoria: ${kind} | ${message}`,
       );
 
+      // As vagas do PRÓPRIO lote que falhou também ficam pendentes: sem este
+      // registro, perderiam a análise por completo (antes só as vagas
+      // posteriores ao bloqueio eram preservadas). Vale para qualquer falha de
+      // IA que exija nova tentativa — indisponibilidade, rede, autenticação,
+      // cota/tokens/orçamento, resposta vazia ou estruturalmente inválida.
+      for (const job of current) {
+        markPending(job, "gemini_unavailable");
+      }
+
       // Falha específica do lote (resposta vazia/estruturalmente inválida):
       // isola o lote e segue para as vagas seguintes.
       if (kind === "invalid") {
@@ -638,12 +679,14 @@ export async function processJobs(
       const analysis = results.get(generateJobKey(job));
 
       // Resultado ausente, inválido ou com chave não reconhecida: a vaga fica
-      // sem análise e será reprocessada numa próxima execução.
+      // sem análise e será reprocessada numa próxima execução, persistida como
+      // pendente para não depender de nova coleta.
       if (!analysis) {
         summary.failedAnalyses++;
         console.error(
           `Análise ausente ou inválida para ${job.title} (${job.company}).`,
         );
+        markPending(job, "gemini_unavailable");
         continue;
       }
 
@@ -675,6 +718,11 @@ export async function processJobs(
     // vagas restantes deixam de ser percorridas (nem o histórico é consultado).
     if (analysesUsed >= jobLimit && !SEND_NOTIFICATIONS && !SEND_REVIEWS) {
       summary.unscannedByLimit = jobs.length - processed;
+      // As vagas restantes são elegíveis e ficam pendentes por limite de
+      // análises (nem o histórico chega a ser consultado para elas).
+      for (const pendingJob of jobs.slice(processed)) {
+        markPending(pendingJob, "analysis_limit");
+      }
       break;
     }
 
@@ -702,6 +750,7 @@ export async function processJobs(
     // pendente e será reprocessada numa próxima execução.
     if (geminiBlocked) {
       summary.unanalyzedByGemini++;
+      markPending(job, "gemini_unavailable");
       continue;
     }
 
@@ -709,6 +758,7 @@ export async function processJobs(
     if (analysesUsed >= jobLimit) {
       // Histórico consultado, mas a vaga fica efetivamente sem análise.
       summary.unanalyzedByLimit++;
+      markPending(job, "analysis_limit");
       continue;
     }
 
@@ -751,6 +801,9 @@ export async function processJobs(
 
     if (sent >= MAX_NOTIFICATIONS) {
       registerSkip(job, "run_limit");
+      // Já analisada e notificável, mas sem envio EXCLUSIVAMENTE pelo limite da
+      // execução: fica pendente para a próxima execução.
+      markPending(job, "notification_limit");
       continue;
     }
 
@@ -847,10 +900,32 @@ export async function runPipeline(
     return null;
   }
 
+  // Fila de pendências: recupera as vagas que não puderam ser concluídas em
+  // execuções anteriores (limite de análises, indisponibilidade da IA ou limite
+  // de envios). As já notificadas e as obsoletas (TTL) são excluídas aqui e
+  // removidas explicitamente na reconciliação, nunca em silêncio. A leitura é
+  // feita apenas fora do modo de auditoria (que encerrou acima).
+  const pendingConfig = resolvePendingJobsConfig();
+  const runStartedAtMs = options.pipelineStartedAtMs ?? Date.now();
+  const priorPending = pendingConfig.enabled
+    ? await loadPendingJobs({ config: pendingConfig })
+    : {
+        records: [],
+        droppedKeys: [],
+        droppedNotified: 0,
+        droppedExpired: 0,
+      };
+  const recoveredJobs = priorPending.records.map((record) => record.job);
+
+  // Vagas recém-coletadas primeiro: na deduplicação por "source:id", a versão
+  // fresca prevalece sobre a pendência equivalente; as pendências apenas
+  // acrescentam vagas que a coleta desta execução NÃO trouxe de volta.
+  const combined = [...jobs, ...recoveredJobs];
+
   // Lista unificada; a deduplicação por "source:id" mantém fontes distintas e o
   // agrupamento conservador remove anúncios equivalentes (mesma empresa, título,
   // descrição substantiva, modalidade, localidades e contratação).
-  const identityUnique = deduplicateJobs(jobs);
+  const identityUnique = deduplicateJobs(combined);
   const { jobs: uniqueJobs, groups: equivalentGroups } =
     groupEquivalentJobs(identityUnique);
   const developerJobs = filterDeveloperJobs(uniqueJobs);
@@ -865,7 +940,7 @@ export async function runPipeline(
   const developerSet = new Set(developerJobs);
   const senioritySet = new Set(seniorityJobs);
   const groupedByEquivalence = identityUnique.length - uniqueJobs.length;
-  const discardedByDedupe = jobs.length - identityUnique.length;
+  const discardedByDedupe = combined.length - identityUnique.length;
   const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
   const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
   // Classificação da localização apenas para observabilidade (função pura).
@@ -902,7 +977,10 @@ export async function runPipeline(
     ? Math.max(MAX_ANALYSES, quota.snapshot.jobBudget)
     : MAX_ANALYSES;
 
-  console.log(`Coletadas: ${jobs.length} | após dedupe: ${identityUnique.length}`);
+  console.log(
+    `Coletadas: ${jobs.length} | pendentes recuperadas: ${recoveredJobs.length} | ` +
+      `após dedupe: ${identityUnique.length}`,
+  );
   console.log(`Desenvolvimento: ${developerJobs.length}`);
   console.log(`Após senioridade: ${seniorityJobs.length}`);
   console.log(`Após localização: ${locationJobs.length}`);
@@ -950,6 +1028,38 @@ export async function runPipeline(
       `${summary.unanalyzedByGemini} não analisada(s) por indisponibilidade da IA | ` +
       `${summary.unscannedByLimit} não percorrida(s) por limite (histórico não consultado)`,
   );
+
+  // Reconcilia a fila de pendências de forma serializada (advisory lock no
+  // PostgreSQL; seção crítica sob withStorageLock no JSON): mantém as vagas
+  // pendentes desta execução e remove as resolvidas — notificadas, obsoletas
+  // (TTL) ou que deixaram de ser elegíveis. As chaves descartadas na leitura e
+  // as pendências que não voltaram a ficar pendentes são removidas
+  // explicitamente, nunca em silêncio. No PostgreSQL a remoção é protegida por
+  // `updated_at < runStartedAtIso`, preservando linhas recém-atualizadas por
+  // execuções concorrentes; no JSON a gravação é atômica sob o lock de storage.
+  if (pendingConfig.enabled) {
+    const pendingKeys = new Set(
+      summary.pendingJobs.map(({ job }) => generateJobKey(job)),
+    );
+    const resolvedKeys = [
+      ...priorPending.droppedKeys,
+      ...priorPending.records
+        .map((record) => record.key)
+        .filter((key) => !pendingKeys.has(key)),
+    ];
+
+    const saved = await savePendingJobs({
+      pending: summary.pendingJobs,
+      resolvedKeys,
+      runStartedAtIso: new Date(runStartedAtMs).toISOString(),
+      config: pendingConfig,
+    });
+
+    console.log(
+      `Fila de pendências: ${saved.kept} persistida(s) | ` +
+        `${saved.removed} removida(s).`,
+    );
+  }
 
   return summary;
 }

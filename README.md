@@ -118,6 +118,9 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
 | `JOBFINDER_MAX_NOTIFICATIONS` | Limite de notificações por execução (compatíveis antes das de revisão) | `3` (teto de `10`) |
+| `JOBFINDER_PENDING_JOBS_ENABLED` | Habilita a fila persistente de vagas pendentes entre execuções | `true` |
+| `JOBFINDER_PENDING_JOB_TTL_DAYS` | Idade máxima (dias) de uma pendência antes de ser considerada obsoleta | `7` |
+| `JOBFINDER_PENDING_MAX_JOBS` | Teto de pendências persistidas (as mais antigas são descartadas) | `200` |
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** do GitHub Actions | `false` |
 | `DATABASE_URL` | Conexão PostgreSQL do Supabase | Obrigatória no modo `postgres` |
 | `DATABASE_CA_CERT_PATH` | Caminho do certificado CA do Supabase | `./certs/prod-ca-2021.crt` |
@@ -234,6 +237,22 @@ Cada análise do Gemini é vinculada a uma **versão centralizada de critérios*
 - **Contadores distintos no resumo:** `failedAnalyses` (falhas), `unanalyzedByLimit` (barradas pelo limite, com histórico consultado), `unanalyzedByGemini` (sem análise por indisponibilidade da IA) e `unscannedByLimit` (nem percorridas pelo limite).
 - **Encerramento explícito:** falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução com código de saída diferente de zero; falhas individuais de provider são registradas e isoladas.
 
+## Fila de vagas pendentes
+
+Vagas **elegíveis** que não puderam ser concluídas em uma execução passam a ter **persistência própria** (`src/services/pending-jobs.ts`) e são recuperadas nas execuções seguintes — **inclusive quando a fonte não as coleta novamente** (o objeto `Job` completo é persistido).
+
+- **Motivos de pendência:**
+  - `analysis_limit` — vaga barrada pelo limite de análises da execução (o histórico foi consultado, mas a vaga não pôde ser analisada nem percorrida).
+  - `gemini_unavailable` — falha da IA que exige nova tentativa: indisponibilidade, rede, autenticação, cota/tokens esgotados, orçamento (de requisições ou de **tempo**) excedido, **resposta vazia/estruturalmente inválida do lote** ou vaga **sem resultado válido**. Inclui as vagas do **próprio lote que falhou**, além das posteriores ao bloqueio.
+  - `notification_limit` — vaga já **analisada e notificável**, mas sem envio **exclusivamente** pelo limite de envios da execução.
+- **Recuperação e combinação:** no início da execução, as pendências são recuperadas e combinadas com as vagas recém-coletadas (`[...jobs, ...recoveredJobs]`). Na deduplicação por `source:id`, a **coleta fresca prevalece**; a pendência só acrescenta a vaga que a coleta desta execução **não** trouxe de volta. A priorização e os filtros existentes são reaplicados, e as análises válidas do histórico continuam sendo reaproveitadas (sem chamadas desnecessárias ao Gemini).
+- **Reconciliação (sem descarte silencioso):** ao final, a fila é reconciliada (`savePendingJobs`): mantém as vagas pendentes desta execução e **remove explicitamente** as resolvidas — notificadas, obsoletas (TTL) ou que deixaram de ser elegíveis. As chaves descartadas na leitura (notificadas/expiradas) e as pendências que não voltaram a ficar pendentes são removidas de forma registrada em log.
+- **Pendências já resolvidas:** uma pendência **já notificada ou reservada** (mesmo `pending`) é excluída da recuperação — as reservas de notificação existentes continuam valendo e impedem reenvio automático. Uma pendência **obsoleta** (mais antiga que o TTL) também é excluída e removida.
+- **Concorrência segura:** a reconciliação é **serializada** — no **PostgreSQL**, dentro de uma transação com **advisory lock** (`pg_advisory_xact_lock`); no **JSON**, a seção crítica é serializada por `withStorageLock`. Nos **dois** backends a remoção das chaves resolvidas é protegida por `updatedAt`/`updated_at` **anterior ao início da execução** (`runStartedAtIso`) e a gravação não regride uma atualização concorrente mais recente. Execuções simultâneas **não** perdem nem duplicam pendências.
+- **TTL e teto:** pendências mais antigas que `JOBFINDER_PENDING_JOB_TTL_DAYS` (padrão `7`) são consideradas obsoletas. Persistidas além de `JOBFINDER_PENDING_MAX_JOBS` (padrão `200`), as entradas **mais antigas** são descartadas (registradas no log).
+- **Sem fallback silencioso:** fila JSON/tabela vazia ou corrompida **lança erro** (nada é apagado); registros do PostgreSQL passam pela **mesma validação de integridade** do JSON (chave `source:id` coerente, motivo permitido, `Job` válido e datas válidas). Desligável por `JOBFINDER_PENDING_JOBS_ENABLED=false`.
+- **Persistência:** JSON em `data/pending-jobs.json` (gravação **atômica** por arquivo temporário + `rename`, sem sobrescrever a fila original quando a gravação falha) ou tabela `public.pending_jobs` (migração `supabase/migrations/20261121000000_create_pending_jobs.sql`), conforme `JOBFINDER_STORAGE`.
+
 ## Persistência: JSON ou PostgreSQL
 
 O backend é escolhido por `JOBFINDER_STORAGE`:
@@ -269,6 +288,9 @@ As migrations ficam em `supabase/migrations/`:
 2. `20261113000000_add_notified_jobs_status.sql` — adiciona a coluna `status` (`pending`/`sent`) em `notified_jobs`.
 3. `20261114000000_add_notified_jobs_reservation_owner.sql` — adiciona `reserved_by` e `reserved_at` (propriedade da reserva) em `notified_jobs`.
 4. `20261115000000_add_analyzed_jobs_criteria_version.sql` — adiciona `criteria_version` em `analyzed_jobs`, troca a chave primária por um `id` substituto e cria a unicidade de negócio `UNIQUE NULLS NOT DISTINCT (key, criteria_version)`, preservando o histórico por versão de critérios.
+5. `20261119000000_add_analyzed_jobs_criteria_statuses.sql` — adiciona `seniority_status` e `technologies_status` (`DEFAULT 'unknown'`) em `analyzed_jobs`, completando os quatro critérios independentes.
+6. `20261120000000_create_gemini_quota.sql` — cria `gemini_quota` (uma linha por dia de cota, com `token_minute`/`tokens_used` para o controle de TPM) com RLS habilitado.
+7. `20261121000000_create_pending_jobs.sql` — cria `pending_jobs` (fila persistente de vagas pendentes entre execuções: `key`, `job` jsonb, `reason`, `first_seen_at`, `updated_at`) com RLS habilitado.
 
 Aplique-as pelo painel/SQL Editor do Supabase ou pelo Supabase CLI:
 
@@ -404,6 +426,9 @@ Em **Settings → Secrets and variables → Actions → Variables**, crie confor
 | `JOBFINDER_SEND_NOTIFICATIONS` | Habilita envios reais | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Habilita avisos de revisão | `false` |
 | `JOBFINDER_MAX_NOTIFICATIONS` | Notificações por execução (1–10) | `3` |
+| `JOBFINDER_PENDING_JOBS_ENABLED` | Habilita a fila persistente de vagas pendentes | `true` |
+| `JOBFINDER_PENDING_JOB_TTL_DAYS` | Idade máxima (dias) de uma pendência | `7` |
+| `JOBFINDER_PENDING_MAX_JOBS` | Teto de pendências persistidas | `200` |
 
 Para ativar o agendamento, defina `JOBFINDER_AUTOMATION_ENABLED=true`. Para ativar os envios, defina também `JOBFINDER_SEND_NOTIFICATIONS=true` **conscientemente**, após validar as credenciais. A execução manual (`workflow_dispatch`) não depende de `JOBFINDER_AUTOMATION_ENABLED`.
 
@@ -489,7 +514,7 @@ npm test
 JOBFINDER_RUN_DB_TESTS=true npm run test:db
 ```
 
-`npm test` executa, em sequência, dez suítes de teste e duas validações determinísticas, todas locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
+`npm test` executa, em sequência, as suítes de teste e as validações determinísticas, todas locais (com `node:test`, sem rede nem chamadas reais a APIs externas):
 
 | Script | Cobre |
 |---|---|
@@ -505,6 +530,7 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 | `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
 | `test-job-sources.mjs` | integridade da configuração de fontes/boards |
 | `test-process-jobs.mjs` | resiliência do `processJobs` em lotes (falha global do Gemini, reuso de análises, limite de tentativas por vaga do lote e aproveitamento dos resultados válidos sem persistir/enviar falhas) |
+| `test-pending-jobs.mjs` | fila persistente de vagas pendentes: persistência por motivo (limite de análises, indisponibilidade da IA e limite de envios), recuperação na execução seguinte sem nova coleta, combinação e deduplicação com a coleta fresca, descarte explícito de pendências já notificadas/obsoletas (TTL), erro alto em fila corrompida/vazia, teto e gravações concorrentes |
 | `validate-linkedin.mjs` (modo local) | matriz de 110 pesquisas do LinkedIn (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 | `validate-indeed.mjs` (modo local) | matriz de 110 pesquisas do Indeed (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 
@@ -546,6 +572,7 @@ jobfinder/
 │   ├── services/
 │   │   ├── ai-analyzer.ts             # Análise via Gemini e versão dos critérios
 │   │   ├── analysis-history.ts        # Histórico de análises (JSON ou PostgreSQL)
+│   │   ├── pending-jobs.ts            # Fila persistente de vagas pendentes entre execuções
 │   │   ├── deduplication.ts           # Chave, reserva e histórico de notificações
 │   │   ├── storage.ts                 # Seleção do backend de persistência
 │   │   ├── rate-limit.ts              # Detecção de HTTP 429 e interrupção parcial
