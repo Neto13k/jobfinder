@@ -1,20 +1,28 @@
 # JobFinder
 
-**Versão 2.2.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
+**Versão 2.3.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
 
 O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 boards públicos de empresas** (Greenhouse, Lever, Ashby e InHire) e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, usa o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v2.2.0 mantém a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Esta versão adota uma **presunção operacional de elegibilidade** para vagas remotas sem restrições geográficas explícitas, expande a matriz de pesquisas do LinkedIn e do Indeed para **220 pesquisas** (110 por provider, em **22 lotes** com ciclo de **22 horas**) e integra as validações determinísticas do LinkedIn e do Indeed ao `npm test`. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.2.0** — seguem planejadas, sem versão definitiva estabelecida.
+> **Escopo desta versão:** a v2.3.0 mantém a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`) e com os boards públicos **Greenhouse**, **Lever**, **Ashby** e **InHire** — **seis providers** no total, sobre **59 boards** configurados — a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Esta versão consolida a **análise por IA com quatro critérios independentes**, a **análise em lote**, o **controle persistente de cota do Gemini**, o **envio de múltiplas notificações por execução** e a **fila persistente de vagas pendentes entre execuções**; adota uma **presunção operacional de elegibilidade** para vagas remotas sem restrições geográficas explícitas, mantém a matriz de pesquisas do LinkedIn e do Indeed em **220 pesquisas** (110 por provider, em **22 lotes** com ciclo de **22 horas**) e integra as validações determinísticas do LinkedIn e do Indeed ao `npm test`. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.3.0** — seguem planejadas, sem versão definitiva estabelecida.
 
-## Novidades da v2.2.0
+## Novidades da v2.3.0
+
+Esta versão consolida o ciclo de evolução da análise por IA, do controle de cota e da confiabilidade entre execuções. Os destaques:
+
+- **Análise por IA com quatro critérios independentes:** a decisão da vaga passa a ser **derivada** de `seniorityStatus`, `technologiesStatus`, `locationStatus` e `contractStatus` (cada um `allowed`, `blocked` ou `unknown`) — qualquer `blocked` ⇒ `incompatible`; qualquer `unknown` ⇒ `review`; todos `allowed` ⇒ `compatible`. A stack prioritária foi ampliada (JavaScript, TypeScript, React, Node.js, Express, PostgreSQL, Next.js, HTML, CSS, Sass e REST) e o orçamento da descrição enviada à IA passa a ser configurável por `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` (padrão `4000`), com truncamento que preserva **início, meio e fim**. A versão vigente é `ANALYSIS_CRITERIA_VERSION = "2026-11-20.1"`; análises de versões anteriores são **reanalisadas** sem apagar o histórico.
+- **Análise em lote (`analyzeJobs`):** as vagas novas são enviadas em **um lote por requisição** via `generateContent` (não a Batch API) — `JOBFINDER_ANALYSIS_BATCH_SIZE` (padrão `5`, teto `10`), **independente** de `JOBFINDER_MAX_ANALYSES` (padrão `5`, teto `10`). O saldo é recalculado antes de montar cada lote e cada vaga é validada **individualmente** por `source:id`.
+- **Controle persistente de cota do Gemini (`gemini-quota.ts`):** cota diária compartilhada entre execuções (padrão `450` RPD, renovada à meia-noite de `America/Los_Angeles`), **reserva atômica** (cota + tokens + intervalo) sobre o estado persistido, intervalo mínimo de `6` s, limite de **tokens de entrada por minuto** (`JOBFINDER_GEMINI_TPM_LIMIT`, teto `250000`), distribuição do orçamento entre as execuções do dia e orçamento de tempo contado **desde o início do pipeline** (`JOBFINDER_GEMINI_TIME_BUDGET_MS`, padrão `8` min).
+- **Múltiplas notificações por execução:** `JOBFINDER_MAX_NOTIFICATIONS` (padrão `3`, teto `10`) substitui o envio de uma única vaga; **todas** as vagas compatíveis são enviadas antes das de revisão manual, na ordem de prioridade, e uma falha individual de envio é isolada.
+- **Fila persistente de vagas pendentes (`pending-jobs.ts`):** vagas elegíveis não concluídas (limite de análises, indisponibilidade da IA/orçamento de tempo ou limite de envios) ganham **persistência própria** e são recuperadas nas execuções seguintes — **inclusive sem nova coleta** —, com TTL (`JOBFINDER_PENDING_JOB_TTL_DAYS`, padrão `7`), teto (`JOBFINDER_PENDING_MAX_JOBS`, padrão `200`) e reconciliação serializada.
+- **Normalização estruturada dos providers e triagem reformulada:** os providers passam a expor `workplaceType`, `contractTypes` e `additionalLocations` (`src/providers/normalize.ts`); a triagem ganhou o filtro de contratação (`contract-filter.ts`), a deduplicação por equivalência substantiva (`groupEquivalentJobs`), a normalização de texto/HTML (`text-normalize.ts`) e o `discardReason` em todo descarte; a priorização foi reescrita como **pontuação determinística `0–100`** (stack `35`, senioridade `30`, localização `20`, recência `10`, contratação `5`).
+
+## Novidades da v2.2.0 (mantidas)
 
 - **Presunção operacional de elegibilidade remota:** vagas **remotas sem restrição geográfica explícita** passam a ser classificadas como `allowed` na triagem (presunção operacional de elegibilidade), e não mais como `unknown`. É uma **presunção de triagem**, distinta da **elegibilidade confirmada pelo Gemini**: a IA continua validando a vaga e pode descartá-la. Os bloqueios explícitos são preservados — residência restrita a outro país, exclusão explícita do Brasil e localizações estrangeiras permanecem `blocked`; sinais contraditórios (localização estrangeira com descrição que declara aceitar residentes no Brasil) permanecem `unknown`.
 - **Expansão da matriz de pesquisas:** LinkedIn e Indeed passam a **110 pesquisas cada** (22 locais em Maceió/AL + 88 remotas no Brasil), totalizando **220 pesquisas** (antes 200). Os **200 termos anteriores foram preservados** em ordem e composição; os novos termos foram acrescentados ao final (2 locais e 8 remotos por provider).
 - **Rotação de 22 lotes:** as 110 pesquisas de cada plataforma formam **22 lotes** (1 local + 4 remotas por hora UTC), com ciclo determinístico de **22 horas** (antes 20).
 - **Validações determinísticas do LinkedIn e do Indeed:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` validam localmente (sem rede) as matrizes e a rotação de cada plataforma e foram integrados ao `npm test`.
-- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-20.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
-- **Análise em lote no Gemini:** as vagas novas passam a ser enviadas ao Gemini em **lotes** por `generateContent` (não a Batch API) — **`5` vagas por requisição (padrão), com teto de `10`** — e o **limite de novas análises por execução** foi elevado para **`5` (padrão) e `10` (teto)** (`JOBFINDER_MAX_ANALYSES`). O tamanho do lote é configurado de forma **independente** por `JOBFINDER_ANALYSIS_BATCH_SIZE` e o saldo restante é recalculado antes de formar e enviar cada lote, de modo que `JOBFINDER_MAX_ANALYSES` nunca seja ultrapassado. Cada vaga é identificada por uma **chave única** (`source:id`) e validada **individualmente**; resultados ausentes, inválidos, com chave desconhecida ou duplicados **conflitantes** são descartados **sem invalidar os válidos**.
-- **Controle de cota do Gemini:** o consumo da API passa a ser **persistido e compartilhado** entre execuções (padrão **450 requisições/dia**, renovadas à meia-noite de `America/Los_Angeles`), com **reserva atômica** por requisição, **intervalo mínimo de 6 s**, distribuição do saldo entre as **24 execuções** diárias e **ampliação do limite de vagas** por execução. Todas as **tentativas** (inclusive falhas e retries) consomem cota; esgotar a cota — ou falhar seu controle — interrompe **novas chamadas** preservando o reaproveitamento do histórico.
 
 ## Novidades da v2.1.0 (mantidas)
 
@@ -24,7 +32,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Normalização de acentos nos filtros:** o filtro de cargo (`filterDeveloperJobs`) normaliza títulos e palavras-chave com Unicode NFD, remoção de diacríticos e minúsculas, tornando a comparação insensível a acentos e maiúsculas.
 - **Política de revisão manual ampliada:** além da decisão `review`, também geram **revisão manual** os casos com localização ou contratação indefinidas (`unknown`). A notificação `compatible` exige decisão `compatible` da IA **e** ambos os critérios `allowed`; qualquer indício indefinido nunca é promovido a elegibilidade confirmada.
 - **Validação determinística da rotação do LinkedIn:** `scripts/validate-linkedin.mjs` passou a validar a matriz de pesquisas e a rotação dos lotes **localmente** e **sem rede** (à época, 100 pesquisas em 20 lotes; atualmente 110 em 22), e foi integrado ao `npm test`. A coleta real é manual e explícita (`node scripts/validate-linkedin.mjs --collect`).
-- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` foi atualizado para `2026-11-19.1` (revisado para `2026-11-20.1` na v2.2.0), disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+- **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` foi atualizado para `2026-11-19.1` (revisado para `2026-11-20.1` na v2.3.0), disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
 
 ### Recursos herdados da v2.0 (mantidos)
 
@@ -298,7 +306,9 @@ Aplique-as pelo painel/SQL Editor do Supabase ou pelo Supabase CLI:
 supabase db push
 ```
 
-Todas as migrations são aditivas (`add column if not exists`) e idempotentes; podem ser aplicadas com segurança sobre o banco já existente. A migration de `criteria_version` exige PostgreSQL 15+ (Supabase 17) por usar `unique nulls not distinct` e `generated always as identity`.
+As migrations são **idempotentes**, mas **não são todas puramente aditivas**: as migrations 1–3 e 5–7 apenas criam objetos/colunas, enquanto a migration **4** (`criteria_version`) **altera a chave primária** de `analyzed_jobs` (troca por um `id` substituto) e cria uma nova unicidade de negócio. A migration 4 exige PostgreSQL 15+ (Supabase 17) por usar `unique nulls not distinct` e `generated always as identity`.
+
+> **Não presuma que o banco esteja vazio.** Antes de aplicar qualquer migration, **verifique o estado atual** do Supabase (por exemplo, consultando `information_schema.tables`/`information_schema.columns` ou o histórico de migrations) e **aplique, na ordem, apenas as que estiverem faltando**. Todas as migrations são idempotentes, mas a migration 4 é uma **mudança de schema** e deve ser aplicada apenas se ainda não tiver sido aplicada.
 
 ## Migração dos históricos locais
 
@@ -441,7 +451,12 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
    Coleta: boards em paralelo + lotes rotativos em sequência
                   |
                   v
-        Normalização e deduplicação
+    Recupera pendências da fila persistente (loadPendingJobs):
+    coleta fresca prevalece; a pendência só acrescenta a vaga
+    que a coleta não trouxe de volta (notificadas/obsoletas saem)
+                  |
+                  v
+        Normalização e deduplicação (por source:id)
                   |
                   v
  Filtros: cargo, senioridade, localização, contratação
@@ -454,7 +469,7 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
            |                 |
           Sim               Não
            |                 |
-   Reutiliza análise     Gemini (até limite)
+   Reutiliza análise   Gemini em lote (até a cota/tempo)
            |                 |
            +--------+--------+
                     |
@@ -467,7 +482,8 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
       Reserva antes do envio           Sem alerta
              |
              v
-      Telegram (até JOBFINDER_MAX_NOTIFICATIONS)
+      Telegram (até JOBFINDER_MAX_NOTIFICATIONS,
+      compatíveis antes das de revisão)
              |
      +-------+-----------------------------+
      |                  |                  |
@@ -476,6 +492,13 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
      v                  v                  v
  confirma (sent)   libera reserva   mantém pending
  (mesma execução)  (nova tentativa)  (sem reenvio)
+                                |
+                                v
+      Vagas elegíveis não concluídas (limite de análises,
+      IA indisponível/orçamento de tempo ou limite de envios)
+      são persistidas na fila de pendências (savePendingJobs)
+      para a próxima execução — reconciliação serializada com
+      guarda runStartedAtIso (TTL e teto aplicados)
 ```
 
 **Critérios gerais de triagem:** priorizar vagas de entrada em desenvolvimento (júnior/estágio) e tecnologias como JavaScript, TypeScript, React, Node.js, Express, Next.js, HTML, CSS, Sass, REST e PostgreSQL; remoto disponível no Brasil ou presencial/híbrido viável em Maceió/AL; contratação CLT ou estágio (aceitando CLT quando oferecida como alternativa real ao PJ). Vagas PJ exclusivas, funções alheias ao desenvolvimento ou com localidade bloqueada não devem ser apresentadas como aprovadas. Os filtros e a IA são mecanismos de triagem, **não garantias de elegibilidade**.
@@ -530,7 +553,7 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 | `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
 | `test-job-sources.mjs` | integridade da configuração de fontes/boards |
 | `test-process-jobs.mjs` | resiliência do `processJobs` em lotes (falha global do Gemini, reuso de análises, limite de tentativas por vaga do lote e aproveitamento dos resultados válidos sem persistir/enviar falhas) |
-| `test-pending-jobs.mjs` | fila persistente de vagas pendentes: persistência por motivo (limite de análises, indisponibilidade da IA e limite de envios), recuperação na execução seguinte sem nova coleta, combinação e deduplicação com a coleta fresca, descarte explícito de pendências já notificadas/obsoletas (TTL), erro alto em fila corrompida/vazia, teto e gravações concorrentes |
+| `test-pending-jobs.mjs` | fila persistente de vagas pendentes: persistência por motivo (limite de análises, indisponibilidade da IA e limite de envios), recuperação na execução seguinte sem nova coleta, combinação e deduplicação com a coleta fresca, descarte explícito de pendências já notificadas ou reservadas (`pending`, sem envio confirmado) e das obsoletas (TTL), erro alto em fila corrompida/vazia, teto e gravações concorrentes |
 | `validate-linkedin.mjs` (modo local) | matriz de 110 pesquisas do LinkedIn (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 | `validate-indeed.mjs` (modo local) | matriz de 110 pesquisas do Indeed (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 
@@ -607,7 +630,7 @@ jobfinder/
 6. Respeitar as cotas e condições das APIs de terceiros. A coleta e a análise exigem conexão à internet e podem estar sujeitas a limites ou cobranças. A coleta via `ts-jobspy` baseia-se em scraping e pode estar sujeita aos termos de uso das plataformas consultadas.
 7. Validar a vaga original antes de realizar qualquer candidatura; o JobFinder não garante disponibilidade, modalidade de contratação ou elegibilidade.
 
-## Limitações conhecidas da v2.2.0
+## Limitações conhecidas da v2.3.0
 
 - **Não há garantia de entrega exatamente uma vez:** o Telegram e o banco não compartilham transação. A reserva antes do envio reduz duplicidades em condições normais, mas não elimina a possibilidade de envio perdido ou de reserva `pending` após uma falha entre o envio e a confirmação. Essas reservas **não** são reenviadas automaticamente e exigem resolução manual (ver *Recuperação de reservas pendentes*).
 - **Persistência JSON não é compartilhada:** no modo `json`, os históricos ficam apenas na máquina local; o GitHub Actions usa `postgres`.
@@ -615,7 +638,7 @@ jobfinder/
 - **Cobertura por execução:** apenas 5 pesquisas do LinkedIn e 5 do Indeed rodam por execução; a cobertura completa das 220 pesquisas depende do ciclo de 22 horas. As pesquisas **não** são executadas simultaneamente.
 - **Dependência de scraping:** a coleta das vagas do LinkedIn e do Indeed depende da `ts-jobspy@3.0.1` e do patch local (`geoId`); mudanças nas plataformas ou atualizações da biblioteca podem exigir ajustes. A versão fica fixada exatamente para preservar a compatibilidade do patch.
 - **Filtros heurísticos:** podem aceitar vagas para revisão ou priorizar incorretamente regiões ambíguas. A elegibilidade presumida para vagas remotas sem restrição geográfica explícita é uma **presunção de triagem**, e `remote: true` **não** significa disponibilidade no Brasil.
-- **Uma mensagem por execução:** oportunidades aprovadas adicionais ficam pendentes para execuções seguintes.
+- **Limite de envios por execução:** o JobFinder envia até `JOBFINDER_MAX_NOTIFICATIONS` vagas por execução (padrão `3`, teto `10`). As vagas compatíveis analisadas que ficarem **sem notificação exclusivamente pelo limite de envios** são persistidas na fila de pendências (`notification_limit`) e recuperadas na execução seguinte.
 - **Risco residual de tempo de execução:** o workflow do GitHub Actions tem `timeout-minutes: 10`, mas **não há garantia de duração máxima do pipeline**. Em cenários de alta latência ou volume elevado — sobretudo na InHire, em que cada vaga exige uma requisição de detalhe adicional — a execução pode se aproximar ou ultrapassar esse teto e ser interrompida pelo próprio Actions. As vagas já coletadas e as análises já persistidas são preservadas, e o restante fica para a próxima execução; contudo, a interrupção externa pode ocorrer sem que o pipeline finalize e registre um resumo.
 - **Falhas parciais:** falhas individuais de **provider** (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs ou Indeed Jobs) são registradas e **isoladas** — a execução continua com as fontes que responderem, sem interromper o fluxo por causa de uma delas, mas essa falha **não** gera, por si só, código de saída diferente de zero. Já falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução e são sinalizadas com código de saída diferente de zero.
 
@@ -627,7 +650,7 @@ jobfinder/
 - **Descoberta de oportunidades divulgadas por recrutadores.**
 - **Estudos de viabilidade, custos e limites de APIs de publicações.**
 
-> **LinkedIn Posts não faz parte da v2.2.0** e permanece **planejado, sem versão definitiva estabelecida**. A v2.2.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada em versão futura, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
+> **LinkedIn Posts não faz parte da v2.3.0** e permanece **planejado, sem versão definitiva estabelecida**. A v2.3.0 cobre apenas **LinkedIn Jobs** e **Indeed Jobs** (vagas publicadas em formato de anúncio). A coleta de **publicações** de recrutadores no feed do LinkedIn será avaliada em versão futura, incluindo estudos de viabilidade, custos e limites de APIs de publicações.
 
 Observabilidade e testes de fluxo mais abrangentes também ficam previstos para as próximas versões.
 
@@ -648,4 +671,4 @@ O JobFinder permanece **exclusivamente backend** — sem interface de frontend �
 
 ---
 
-**Status:** v2.2.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos** e **220 pesquisas** (110 do LinkedIn + 110 do Indeed). Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-20.1"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório.
+**Status:** v2.3.0 implementada e validada em build e testes automatizados, com **seis providers** — LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire — sobre **59 boards públicos** e **220 pesquisas** (110 do LinkedIn + 110 do Indeed). Os critérios de análise estão versionados em `ANALYSIS_CRITERIA_VERSION = "2026-11-20.1"`. A versão só deve ser marcada como lançada depois da revisão final de configuração, segurança e documentação no repositório (ver o checklist de release em `RELEASE-v2.3.0.md`).

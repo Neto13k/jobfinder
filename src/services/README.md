@@ -88,9 +88,16 @@ Serviços e regras de negócio do pipeline.
   padrão 7). `savePendingJobs` reconcilia a fila (mantém as pendentes + remove as
   resolvidas), aplica o teto `JOBFINDER_PENDING_MAX_JOBS` (padrão 200, descartando
   as mais antigas) e é **serializada** — advisory lock transacional no PostgreSQL e
-  `withStorageLock` no JSON — com a remoção das chaves resolvidas protegida por
-  `updatedAt`/`updated_at` anterior ao início da execução (`runStartedAtIso`),
-  evitando perdas/duplicações entre execuções concorrentes. Desligável por
+  `withStorageLock` no JSON. Nos **dois** backends, **tanto a remoção das
+  `resolvedKeys` quanto a atualização/upsert** são protegidas por
+  `updatedAt`/`updated_at` **anterior ao início da execução** (`runStartedAtIso`):
+  só se remove/sobrescreve um registro anterior ao início desta execução, de modo
+  que uma execução **mais antiga** que grave **depois** (em tempo de relógio) **não**
+  apague nem sobrescreva uma pendência atualizada por uma execução **mais recente**.
+  No JSON, a condição de escrita é `existing.updatedAt >= runStartedAtIso ⇒ ignora`;
+  no PostgreSQL, o `on conflict ... do update` recebe
+  `where public.pending_jobs.updated_at < $runStartedAtIso`. Isso evita
+  perdas/duplicações entre execuções concorrentes. Desligável por
   `JOBFINDER_PENDING_JOBS_ENABLED` (padrão `true`).
 
 ## Notificação e utilidades

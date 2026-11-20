@@ -16,6 +16,9 @@ build/
 # Histórico de vagas já notificadas
 data/
 
+# Referência permanente para agentes de IA (mantida apenas localmente)
+AGENTS.md
+
 .DS_Store
 
 

@@ -9,7 +9,8 @@
 // execuções anteriores (mesmo sem nova coleta), o registro por motivo
 // (limite de análises, indisponibilidade da IA e limite de envios), a
 // combinação com as vagas recém-coletadas (com a deduplicação existente), o
-// descarte explícito de pendências já notificadas/obsoletas (TTL), o erro
+// descarte explícito de pendências já notificadas OU reservadas (`pending`, sem
+// envio confirmado) e das obsoletas (TTL), o erro
 // alto em fila corrompida/vazia (sem fallback silencioso), o TTL, o teto de
 // pendências, a serialização de gravações concorrentes, a preservação das
 // vagas do PRÓPRIO lote que falhou e das vagas sem resultado válido, a
@@ -327,6 +328,44 @@ test("descarta pendência já notificada sem recuperá-la", async () => {
     assert.equal(loaded.records.length, 0);
     assert.equal(loaded.droppedNotified, 1);
     assert.deepEqual(loaded.droppedKeys, [dedup.generateJobKey(notified)]);
+  });
+});
+
+test("descarta pendência com reserva PENDENTE (não confirmada) sem recuperá-la", async () => {
+  await withTempDir(async () => {
+    const reserved = job({ id: "reserved-pending" });
+
+    // Reserva de notificação obtida, mas NÃO confirmada (status 'pending'):
+    // representa um envio de resultado incerto, que não deve ser recriado.
+    const reservation = await dedup.reserveJobNotification(reserved);
+    assert.ok(reservation);
+
+    await pending.savePendingJobs({
+      pending: [{ job: reserved, reason: "notification_limit" }],
+      resolvedKeys: [],
+    });
+
+    // A reserva (mesmo 'pending') conta como já notificada: a pendência é
+    // excluída da recuperação e registrada para remoção explícita.
+    const loaded = await pending.loadPendingJobs();
+    assert.equal(loaded.records.length, 0);
+    assert.equal(loaded.droppedNotified, 1);
+    assert.deepEqual(loaded.droppedKeys, [dedup.generateJobKey(reserved)]);
+
+    // Execução seguinte, SEM nova coleta: nada é analisado nem reenviado.
+    const summary = await runPipeline([], {
+      dependencies: deps(async (batch) => {
+        const map = new Map();
+        for (const item of batch) {
+          map.set(dedup.generateJobKey(item), analysis());
+        }
+        return map;
+      }),
+    });
+
+    assert.equal(summary.analyzed, 0);
+    assert.equal(summary.sentCompatible, 0);
+    assert.equal((await readPending()).length, 0);
   });
 });
 
