@@ -168,13 +168,37 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
     indeed: 1,
   });
   assert.equal(report.duplicates, 1);
-  assert.deepEqual(report.discarded, { developer: 1, seniority: 1, location: 1 });
+  assert.equal(report.groupedByEquivalence, 0);
+  assert.deepEqual(report.discarded, {
+    developer: 1,
+    seniority: 1,
+    location: 1,
+    contract: 0,
+  });
   assert.equal(report.approved, 3);
   assert.deepEqual(report.locationDistribution, {
     allowed: 3,
     blocked: 1,
     unknown: 0,
   });
+  assert.deepEqual(report.contractDistribution, {
+    allowed: 0,
+    blocked: 0,
+    unknown: 3,
+  });
+  assert.deepEqual(report.equivalentGroups, []);
+
+  // Consistência matemática dos totais.
+  assert.equal(
+    report.totalCollected,
+    report.duplicates +
+      report.groupedByEquivalence +
+      report.approved +
+      report.discarded.developer +
+      report.discarded.seniority +
+      report.discarded.location +
+      report.discarded.contract,
+  );
 
   // Sem limite de exemplos: todas as vagas únicas entram no relatório.
   assert.equal(report.jobs.length, 6);
@@ -185,9 +209,12 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
     [
       "approved",
       "collectedByProvider",
+      "contractDistribution",
       "discarded",
       "duplicates",
+      "equivalentGroups",
       "generatedAt",
+      "groupedByEquivalence",
       "jobs",
       "locationDistribution",
       "totalCollected",
@@ -200,7 +227,11 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   // Aprovada: sem descarte, classificada e posicionada na fila.
   const ok1 = byKey.get("linkedin:ok1");
   assert.equal(ok1.discardStage, null);
+  assert.equal(ok1.discardReason, null);
   assert.equal(ok1.locationClassification, "allowed");
+  // Sem contratação informada: classificada como indefinida, não aprovada por CLT.
+  assert.equal(ok1.contractClassification, "unknown");
+  assert.equal(ok1.equivalentGroup, null);
   assert.equal(ok1.queuePosition, 1);
   assert.equal(ok1.description, "Remoto.");
   assert.equal(ok1.url, "https://epsilon.example.com/jobs/ok1");
@@ -211,9 +242,12 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
     [
       "additionalLocations",
       "company",
+      "contractClassification",
       "contractTypes",
       "description",
+      "discardReason",
       "discardStage",
+      "equivalentGroup",
       "id",
       "key",
       "location",
@@ -252,19 +286,133 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   // Descartada no filtro de desenvolvimento: não chega à classificação geográfica.
   const mkt = byKey.get("lever:mkt");
   assert.equal(mkt.discardStage, "developer");
+  assert.match(mkt.discardReason, /marketing/);
   assert.equal(mkt.locationClassification, null);
   assert.equal(mkt.queuePosition, null);
 
   const senior = byKey.get("ashby:senior");
   assert.equal(senior.discardStage, "seniority");
+  assert.match(senior.discardReason, /senior/);
   assert.equal(senior.locationClassification, null);
   assert.equal(senior.queuePosition, null);
 
   // Descartada por localização: classificada como bloqueada, fora da fila.
   const us = byKey.get("inhire:us");
   assert.equal(us.discardStage, "location");
+  assert.match(us.discardReason, /localiza/i);
   assert.equal(us.locationClassification, "blocked");
   assert.equal(us.queuePosition, null);
+});
+
+test("relatório de auditoria registra agrupamento por equivalência e descarte por contratação", () => {
+  // Descrição substantiva idêntica: comprova a equivalência dos anúncios.
+  const sharedDescription =
+    "Buscamos pessoa desenvolvedora para atuar no desenvolvimento de software, " +
+    "construindo APIs e integrando sistemas distribuídos.";
+
+  const bluelightA = job({
+    source: "linkedin",
+    id: "bl-1",
+    company: "Bluelight Consulting",
+    title: "Desenvolvedor Full Stack",
+    url: "https://bl/1",
+    description: sharedDescription,
+  });
+  const bluelightB = job({
+    source: "indeed",
+    id: "bl-2",
+    company: "Bluelight Consulting",
+    title: "Desenvolvedor Full Stack",
+    url: "https://bl/2",
+    location: "Remoto - Brasil",
+    description: sharedDescription,
+  });
+  const pj = job({
+    source: "greenhouse",
+    id: "pj",
+    company: "PJ Corp",
+    title: "Desenvolvedor Backend",
+    url: "https://pj/1",
+    contractTypes: ["PJ"],
+    description: "Contratação exclusivamente PJ.",
+  });
+  const clt = job({
+    source: "lever",
+    id: "clt",
+    company: "CLT Corp",
+    title: "Desenvolvedor Frontend",
+    url: "https://clt/1",
+    contractTypes: ["CLT"],
+    description: "Contratação CLT.",
+  });
+
+  const report = buildAuditReport([bluelightA, bluelightB, pj, clt], REFERENCE);
+
+  // Um agrupamento (2 registros → 1 representante) e um descarte por contratação.
+  assert.equal(report.totalCollected, 4);
+  assert.equal(report.uniqueJobs, 4);
+  assert.equal(report.groupedByEquivalence, 1);
+  assert.deepEqual(report.discarded, {
+    developer: 0,
+    seniority: 0,
+    location: 0,
+    contract: 1,
+  });
+  assert.equal(report.approved, 2);
+  assert.deepEqual(report.contractDistribution, {
+    allowed: 1,
+    blocked: 1,
+    unknown: 1,
+  });
+
+  // Consistência matemática dos totais.
+  assert.equal(
+    report.totalCollected,
+    report.duplicates +
+      report.groupedByEquivalence +
+      report.approved +
+      report.discarded.developer +
+      report.discarded.seniority +
+      report.discarded.location +
+      report.discarded.contract,
+  );
+
+  // O grupo preserva o representante estável (menor chave "source:id") e o
+  // anúncio removido (id, URL e localidade).
+  assert.equal(report.equivalentGroups.length, 1);
+  assert.equal(report.equivalentGroups[0].representativeKey, "indeed:bl-2");
+  assert.deepEqual(report.equivalentGroups[0].members, [
+    {
+      key: "linkedin:bl-1",
+      id: "bl-1",
+      source: "linkedin",
+      url: "https://bl/1",
+      location: "Remoto - Brasil",
+    },
+  ]);
+
+  // Todos os registros únicos originais permanecem auditáveis.
+  assert.equal(report.jobs.length, 4);
+  const byKey = new Map(report.jobs.map((entry) => [entry.key, entry]));
+
+  const grouped = byKey.get("linkedin:bl-1");
+  assert.equal(grouped.equivalentGroup, "indeed:bl-2");
+  assert.equal(grouped.discardStage, null);
+  assert.equal(grouped.discardReason, null);
+  assert.equal(grouped.queuePosition, null);
+
+  // Descarte por contratação: bloqueada na etapa própria, sem entrar na fila.
+  const pjEntry = byKey.get("greenhouse:pj");
+  assert.equal(pjEntry.discardStage, "contract");
+  assert.match(pjEntry.discardReason, /pj/i);
+  assert.equal(pjEntry.locationClassification, "allowed");
+  assert.equal(pjEntry.contractClassification, "blocked");
+  assert.equal(pjEntry.queuePosition, null);
+
+  // CLT confirmada: aprovada e classificada como permitida.
+  const cltEntry = byKey.get("lever:clt");
+  assert.equal(cltEntry.discardStage, null);
+  assert.equal(cltEntry.contractClassification, "allowed");
 });
 
 test("runAudit grava o relatório em data/audit identificado pela data e hora", async () => {

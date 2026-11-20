@@ -19,7 +19,12 @@ import {
   markJobAsAnalyzed,
 } from "./services/analysis-history.js";
 import { runAudit } from "./services/audit-report.js";
-import { deduplicateJobs, isJobNotified } from "./services/deduplication.js";
+import { classifyJobContract, filterByContract } from "./services/contract-filter.js";
+import {
+  deduplicateJobs,
+  groupEquivalentJobs,
+  isJobNotified,
+} from "./services/deduplication.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
 import {
@@ -604,19 +609,25 @@ export async function runPipeline(
     return null;
   }
 
-  // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
-  const uniqueJobs = deduplicateJobs(jobs);
+  // Lista unificada; a deduplicação por "source:id" mantém fontes distintas e o
+  // agrupamento conservador remove anúncios equivalentes (mesma empresa, título,
+  // descrição substantiva, modalidade, localidades e contratação).
+  const identityUnique = deduplicateJobs(jobs);
+  const { jobs: uniqueJobs, groups: equivalentGroups } =
+    groupEquivalentJobs(identityUnique);
   const developerJobs = filterDeveloperJobs(uniqueJobs);
   const seniorityJobs = filterBySeniority(developerJobs);
-  const eligibleJobs = filterByLocation(seniorityJobs);
+  const locationJobs = filterByLocation(seniorityJobs);
+  const contractJobs = filterByContract(locationJobs);
   // Ordena por prioridade geográfica sem descartar vagas elegíveis.
-  const prioritizedJobs = prioritizeJobs(eligibleJobs);
+  const prioritizedJobs = prioritizeJobs(contractJobs);
 
   // Grupos descartados por etapa, derivados por identidade de objeto (os
   // filtros preservam as referências), sem alterar as regras de elegibilidade.
   const developerSet = new Set(developerJobs);
   const senioritySet = new Set(seniorityJobs);
-  const discardedByDedupe = jobs.length - uniqueJobs.length;
+  const groupedByEquivalence = identityUnique.length - uniqueJobs.length;
+  const discardedByDedupe = jobs.length - identityUnique.length;
   const discardedByDeveloper = uniqueJobs.filter((job) => !developerSet.has(job));
   const discardedBySeniority = developerJobs.filter((job) => !senioritySet.has(job));
   // Classificação da localização apenas para observabilidade (função pura).
@@ -630,20 +641,36 @@ export async function runPipeline(
   const unknownLocationJobs = seniorityJobs.filter(
     (job) => locationByJob.get(job) === "unknown",
   );
+  const discardedByContract = locationJobs.filter(
+    (job) => classifyJobContract(job) === "blocked",
+  );
 
-  console.log(`Coletadas: ${jobs.length} | após dedupe: ${uniqueJobs.length}`);
+  console.log(`Coletadas: ${jobs.length} | após dedupe: ${identityUnique.length}`);
   console.log(`Desenvolvimento: ${developerJobs.length}`);
   console.log(`Após senioridade: ${seniorityJobs.length}`);
-  console.log(`Após localização: ${eligibleJobs.length}`);
+  console.log(`Após localização: ${locationJobs.length}`);
+  console.log(`Após contratação: ${contractJobs.length}`);
   console.log(`Armazenamento: ${getStorageBackend()}`);
   console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
 
   // Detalhamento dos descartes de cada filtro, com exemplos.
   console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
+  console.log(`Anúncios agrupados por equivalência: ${groupedByEquivalence}`);
   logJobGroup("Descartadas por desenvolvimento", discardedByDeveloper);
   logJobGroup("Descartadas por senioridade", discardedBySeniority);
   logJobGroup("Bloqueadas por localização", blockedByLocation);
   logJobGroup("Localização indefinida", unknownLocationJobs);
+  logJobGroup("Bloqueadas por contratação", discardedByContract);
+
+  // Os grupos de equivalência preservam identificadores e URLs para auditoria.
+  for (const group of equivalentGroups) {
+    const members = group.members
+      .map((member) => `${member.key} (${member.url || "sem URL"})`)
+      .join(", ");
+    console.log(
+      `Anúncios equivalentes de ${group.representativeKey}: ${members}`,
+    );
+  }
 
   const summary = await processJobs(prioritizedJobs, options.dependencies);
 
