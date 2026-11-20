@@ -44,6 +44,27 @@ Serviços e regras de negócio do pipeline.
   vigente de critérios e preserva versões anteriores. Registros legados, sem os
   critérios `seniorityStatus`/`technologiesStatus`, são lidos normalizando-os
   como `unknown`, sem reutilizá-los nem alterar decisões históricas.
+- `gemini-quota.ts` — controle persistente da cota do Gemini: **450
+  requisições/dia** (teto operacional; configurável) com renovação à meia-noite
+  de `America/Los_Angeles`, **intervalo mínimo compartilhado** de 6 s (piso em
+  produção), **limite conservador de tokens de entrada por minuto** (250k TPM,
+  sobre o prompt completo) e orçamento de tempo **contado desde o início do
+  pipeline** (coleta e esperas inclusas; padrão 8 min, abaixo do
+  `timeout-minutes: 10` do Actions, com margem `CALL_RESERVE_MS`). A reserva por
+  requisição é **atômica** e avalia, na MESMA operação sobre o **estado
+  persistido**, a cota, os tokens e o intervalo (UPDATE condicional no PostgreSQL;
+  `withStorageLock` no JSON) — impedindo que execuções simultâneas (inclusive
+  entre gerenciadores) ultrapassem qualquer limite; cada **tentativa** consome uma
+  reserva (inclusive falhas e retries). O **dia de cota** e a **janela de minuto**
+  são **revalidados antes de cada reserva** (inclusive após esperas e na virada da
+  meia-noite). `planExecutionAllowance` distribui o saldo diário entre as execuções
+  previstas (reaproveitando o não utilizado) e `planJobBudget` converte o orçamento
+  de requisições em limite de vagas (orçamento × tamanho do lote). Ao esgotar a
+  cota, os tokens, o orçamento ou o tempo — ou ao **falhar** o controle — `acquire`
+  lança `GeminiAnalysisError` e o pipeline interrompe novas chamadas, preservando
+  o reaproveitamento do histórico. Persistência em `data/gemini-quota.json` (JSON,
+  com `tokenMinute`/`tokens`) ou na tabela `public.gemini_quota` (colunas
+  `token_minute`/`tokens_used`).
 - `deduplication.ts` — chave `source:id`, reserva e histórico de notificações.
 - `storage.ts` — seleção explícita do backend (`json` ou `postgres`), sem fallback
   silencioso.

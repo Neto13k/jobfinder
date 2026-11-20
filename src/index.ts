@@ -11,6 +11,7 @@ import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
 import {
   analyzeJobs,
+  estimatePromptTokens,
   GeminiAnalysisError,
   resolveBatchSize,
   resolveConfiguredBatchSize,
@@ -28,6 +29,10 @@ import {
   groupEquivalentJobs,
   isJobNotified,
 } from "./services/deduplication.js";
+import {
+  createGeminiQuotaManager,
+  type GeminiQuotaManager,
+} from "./services/gemini-quota.js";
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
 import {
@@ -324,6 +329,14 @@ export interface ProcessDependencies {
     candidate: NotificationCandidate,
     kind: NotificationKind,
   ) => Promise<boolean>;
+  /**
+   * Gerencia a cota do Gemini (reserva atômica, intervalo mínimo e orçamento
+   * diário). Opcional: quando ausente (execuções em teste), o limite por
+   * execução volta a ser {@link MAX_ANALYSES} e nenhuma reserva é feita. Ao
+   * esgotar a cota, o orçamento ou o tempo — ou falhar o controle — `acquire`
+   * lança GeminiAnalysisError e novas chamadas são interrompidas.
+   */
+  quota?: GeminiQuotaManager;
 }
 
 /** Dependências reais usadas em produção. */
@@ -335,21 +348,26 @@ const DEFAULT_DEPENDENCIES: ProcessDependencies = {
 /**
  * Processa as vagas na ordem recebida (prioridade geográfica).
  *
- * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (inclusive
- * as marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
+ * Analisa até o limite de vagas da execução — ampliado pelo orçamento de
+ * requisições da cota do Gemini (orçamento × tamanho do lote), com
+ * JOBFINDER_MAX_ANALYSES como piso. Reaproveita análises salvas (inclusive as
+ * marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
  * notificação por execução, priorizando as vagas compatíveis.
  *
  * As vagas novas são enviadas ao Gemini em LOTES por `generateContent` (não a
  * Batch API): até BATCH_SIZE vagas por requisição (JOBFINDER_ANALYSIS_BATCH_SIZE;
  * padrão 5, teto de 10), independente do limite por execução. O saldo restante
- * de tentativas é recalculado ANTES de formar e enviar cada lote, de modo que
- * MAX_ANALYSES nunca seja ultrapassado — inclusive quando o limite não é
- * múltiplo do tamanho do lote. O histórico é consultado ANTES de incluir a vaga
- * no lote, e cada resultado é validado individualmente, aproveitando os válidos
- * mesmo quando faltam, são inválidos, trazem chaves desconhecidas ou duplicam a
- * mesma chave de forma conflitante. O lote pendente é resolvido antes de uma
- * vaga recuperada de prioridade posterior, preservando a ordem de prioridade na
- * escolha do candidato a notificação.
+ * de tentativas é recalculado ANTES de formar e enviar cada lote, de modo que o
+ * limite nunca seja ultrapassado — inclusive quando não é múltiplo do tamanho do
+ * lote. Antes de cada requisição, a cota é reservada de forma atômica
+ * (`quota.acquire`); esgotar a cota, o orçamento da execução ou o tempo — ou
+ * falhar o controle — interrompe novas chamadas (falha global). O histórico é
+ * consultado ANTES de incluir a vaga no lote, e cada resultado é validado
+ * individualmente, aproveitando os válidos mesmo quando faltam, são inválidos,
+ * trazem chaves desconhecidas ou duplicam a mesma chave de forma conflitante. O
+ * lote pendente é resolvido antes de uma vaga recuperada de prioridade
+ * posterior, preservando a ordem de prioridade na escolha do candidato a
+ * notificação.
  *
  * Quando a IA fica indisponível (falha global, não específica dos dados da
  * vaga), novas chamadas ao Gemini são interrompidas pelo restante da execução,
@@ -404,6 +422,17 @@ export async function processJobs(
   // Vagas cuja iteração já começou; usado para medir o que sobra no break.
   let processed = 0;
 
+  // Limite de vagas desta execução. Com a cota gerenciada, ele é ampliado pelo
+  // orçamento de requisições da execução (orçamento × tamanho do lote),
+  // preservando JOBFINDER_MAX_ANALYSES como PISO — assim, quando a cota esgota
+  // (orçamento 0), o laço segue percorrendo as vagas para reaproveitar o
+  // histórico salvo. Sem cota (execuções em teste), vale o próprio
+  // JOBFINDER_MAX_ANALYSES. O teto EFETIVO de chamadas é a reserva atômica da
+  // cota (`acquire`), de modo que o total diário nunca é ultrapassado.
+  const jobLimit = deps.quota
+    ? Math.max(MAX_ANALYSES, deps.quota.snapshot.jobBudget)
+    : MAX_ANALYSES;
+
   // Chamadas ao Gemini já realizadas nesta execução. Diferente de
   // `summary.analyzed` (que conta só os sucessos), este contador limita as
   // TENTATIVAS: uma falha também consome o limite, impedindo chamadas
@@ -422,12 +451,13 @@ export async function processJobs(
 
   /** Saldo de tentativas ainda disponível nesta execução (nunca negativo). */
   const remainingBalance = (): number =>
-    Math.max(0, MAX_ANALYSES - analysesUsed);
+    Math.max(0, jobLimit - analysesUsed);
 
   /**
    * Vagas permitidas no próximo lote: o menor valor entre o tamanho
    * configurado e o saldo restante. Recalculado antes de formar e enviar cada
-   * lote para que `JOBFINDER_MAX_ANALYSES` nunca seja ultrapassado.
+   * lote para que o limite de vagas da execução (`jobLimit`) nunca seja
+   * ultrapassado.
    */
   const batchCapacity = (): number =>
     resolveBatchSize(remainingBalance(), BATCH_SIZE);
@@ -491,20 +521,21 @@ export async function processJobs(
    * cada vaga individualmente.
    *
    * Antes de enviar, recalcula o saldo restante e limita o lote a ele, de modo
-   * que `MAX_ANALYSES` nunca seja ultrapassado. Cada vaga é identificada pela
-   * chave "source:id"; resultados ausentes, inválidos, com chave desconhecida ou
-   * duplicados conflitantes consomem a tentativa da vaga, mas são descartados
-   * sem invalidar os resultados válidos nem o restante da execução. Uma falha
-   * global (cota, indisponibilidade, rede ou autenticação) interrompe as
-   * próximas requisições, preservando as análises salvas e deixando as vagas
-   * pendentes para a próxima execução.
+   * que o limite de vagas da execução (`jobLimit`) nunca seja ultrapassado. A
+   * cota é reservada de forma atômica antes da requisição. Cada vaga é
+   * identificada pela chave "source:id"; resultados ausentes, inválidos, com
+   * chave desconhecida ou duplicados conflitantes consomem a tentativa da vaga,
+   * mas são descartados sem invalidar os resultados válidos nem o restante da
+   * execução. Uma falha global (cota, indisponibilidade, rede ou autenticação)
+   * interrompe as próximas requisições, preservando as análises salvas e
+   * deixando as vagas pendentes para a próxima execução.
    */
   const flushBatch = async (): Promise<void> => {
     if (batch.length === 0) {
       return;
     }
 
-    // Recalcula o saldo ANTES de enviar: o lote nunca ultrapassa MAX_ANALYSES,
+    // Recalcula o saldo ANTES de enviar: o lote nunca ultrapassa jobLimit,
     // mesmo que o tamanho configurado seja maior que o saldo restante.
     const current = batch.slice(0, batchCapacity());
     batch = batch.slice(current.length);
@@ -521,6 +552,16 @@ export async function processJobs(
 
     let results: Map<string, JobAnalysis>;
     try {
+      // Reserva a cota ANTES da requisição: cada TENTATIVA consome uma reserva,
+      // inclusive quando a chamada falha depois (falhas e retries contam).
+      // Esgotar a cota, o orçamento da execução, o tempo ou os TOKENS de entrada
+      // do prompt completo — ou falhar o controle — lança GeminiAnalysisError e
+      // cai no tratamento abaixo, que interrompe novas chamadas sem derrubar o
+      // laço.
+      if (deps.quota) {
+        await deps.quota.acquire(estimatePromptTokens(current));
+      }
+
       results = await deps.analyzeBatch(current);
     } catch (error) {
       summary.failedAnalyses += current.length;
@@ -584,7 +625,7 @@ export async function processJobs(
 
   for (const job of jobs) {
     // Limite de chamadas atingido: só continua se ainda houver envio pendente.
-    if (analysesUsed >= MAX_ANALYSES) {
+    if (analysesUsed >= jobLimit) {
       if (!SEND_NOTIFICATIONS || compatibleCandidate) {
         // As vagas restantes nem chegam a ter o histórico consultado.
         summary.unscannedByLimit = jobs.length - processed;
@@ -620,7 +661,7 @@ export async function processJobs(
     }
 
     // Sem resultado salvo e limite atingido: não chama o Gemini.
-    if (analysesUsed >= MAX_ANALYSES) {
+    if (analysesUsed >= jobLimit) {
       // Histórico consultado, mas a vaga fica efetivamente sem análise.
       summary.unanalyzedByLimit++;
       continue;
@@ -681,6 +722,12 @@ export interface PipelineOptions {
   auditDirectory?: string;
   /** Instante de referência da priorização (padrão: agora). */
   referenceDate?: Date;
+  /**
+   * Instante (ms) do INÍCIO DO PIPELINE (antes da coleta), base do orçamento de
+   * tempo da cota do Gemini — que conta a coleta e as esperas. Padrão: instante
+   * da criação do gerenciador de cota.
+   */
+  pipelineStartedAtMs?: number;
   /** Dependências de análise e notificação (padrão: implementações reais). */
   dependencies?: ProcessDependencies;
 }
@@ -755,13 +802,32 @@ export async function runPipeline(
     (job) => classifyJobContract(job) === "blocked",
   );
 
+  // Cota do Gemini: gerenciada apenas na execução real (sem dependências
+  // injetadas). Em testes, as dependências falsas substituem a análise e a
+  // cota; sem ela, o limite por execução volta a ser JOBFINDER_MAX_ANALYSES. O
+  // orçamento de tempo conta desde o INÍCIO do pipeline (coleta e esperas).
+  const quota =
+    options.dependencies?.quota ??
+    (options.dependencies
+      ? undefined
+      : await createGeminiQuotaManager({
+          batchSize: BATCH_SIZE,
+          pipelineStartedAtMs: options.pipelineStartedAtMs,
+        }));
+
+  // Limite de vagas desta execução, ampliado pelo orçamento de requisições da
+  // cota (orçamento × tamanho do lote), com JOBFINDER_MAX_ANALYSES como piso.
+  const jobLimit = quota
+    ? Math.max(MAX_ANALYSES, quota.snapshot.jobBudget)
+    : MAX_ANALYSES;
+
   console.log(`Coletadas: ${jobs.length} | após dedupe: ${identityUnique.length}`);
   console.log(`Desenvolvimento: ${developerJobs.length}`);
   console.log(`Após senioridade: ${seniorityJobs.length}`);
   console.log(`Após localização: ${locationJobs.length}`);
   console.log(`Após contratação: ${contractJobs.length}`);
   console.log(`Armazenamento: ${getStorageBackend()}`);
-  console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
+  console.log(`Limite de vagas nesta execução: ${jobLimit}`);
   console.log(`Vagas por requisição ao Gemini (lote): ${BATCH_SIZE}`);
 
   // Detalhamento dos descartes de cada filtro, com exemplos.
@@ -783,7 +849,12 @@ export async function runPipeline(
     );
   }
 
-  const summary = await processJobs(prioritizedJobs, options.dependencies);
+  const baseDependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
+  const dependencies: ProcessDependencies = quota
+    ? { ...baseDependencies, quota }
+    : baseDependencies;
+
+  const summary = await processJobs(prioritizedJobs, dependencies);
 
   console.log(
     `Resumo: ${summary.analyzed} nova(s) análise(s) | ` +
@@ -810,6 +881,10 @@ export async function runPipeline(
  * Supabase ou Telegram.
  */
 async function main() {
+  // Marca o início do pipeline ANTES da coleta: o orçamento de tempo da cota do
+  // Gemini conta a coleta e as esperas, não apenas a fase de análise.
+  const pipelineStartedAtMs = Date.now();
+
   try {
     const linkedinBatch = selectLinkedInBatch();
     logLinkedInBatch(linkedinBatch);
@@ -828,7 +903,7 @@ async function main() {
     // Lista unificada; a deduplicação por "source:id" mantém fontes distintas.
     const jobs = [...boardCollected.flat(), ...rotatedCollected];
 
-    await runPipeline(jobs, { auditOnly: AUDIT_ONLY });
+    await runPipeline(jobs, { auditOnly: AUDIT_ONLY, pipelineStartedAtMs });
   } catch (error) {
     // Loga apenas a mensagem, sem expor tokens ou chaves.
     const message = error instanceof Error ? error.message : String(error);

@@ -14,6 +14,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Validações determinísticas do LinkedIn e do Indeed:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` validam localmente (sem rede) as matrizes e a rotação de cada plataforma e foram integrados ao `npm test`.
 - **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-20.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
 - **Análise em lote no Gemini:** as vagas novas passam a ser enviadas ao Gemini em **lotes** por `generateContent` (não a Batch API) — **`5` vagas por requisição (padrão), com teto de `10`** — e o **limite de novas análises por execução** foi elevado para **`5` (padrão) e `10` (teto)** (`JOBFINDER_MAX_ANALYSES`). O tamanho do lote é configurado de forma **independente** por `JOBFINDER_ANALYSIS_BATCH_SIZE` e o saldo restante é recalculado antes de formar e enviar cada lote, de modo que `JOBFINDER_MAX_ANALYSES` nunca seja ultrapassado. Cada vaga é identificada por uma **chave única** (`source:id`) e validada **individualmente**; resultados ausentes, inválidos, com chave desconhecida ou duplicados **conflitantes** são descartados **sem invalidar os válidos**.
+- **Controle de cota do Gemini:** o consumo da API passa a ser **persistido e compartilhado** entre execuções (padrão **450 requisições/dia**, renovadas à meia-noite de `America/Los_Angeles`), com **reserva atômica** por requisição, **intervalo mínimo de 6 s**, distribuição do saldo entre as **24 execuções** diárias e **ampliação do limite de vagas** por execução. Todas as **tentativas** (inclusive falhas e retries) consomem cota; esgotar a cota — ou falhar seu controle — interrompe **novas chamadas** preservando o reaproveitamento do histórico.
 
 ## Novidades da v2.1.0 (mantidas)
 
@@ -106,8 +107,13 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `TELEGRAM_BOT_TOKEN` | Token do bot | Necessário para enviar mensagens |
 | `TELEGRAM_CHAT_ID` | Chat de destino | Necessário para enviar mensagens |
 | `JOBFINDER_STORAGE` | Backend de histórico: `json` ou `postgres` | `json` |
-| `JOBFINDER_MAX_ANALYSES` | Número máximo de novas análises por execução | `5` (teto de `10`) |
+| `JOBFINDER_MAX_ANALYSES` | Limite base (piso) de novas análises por execução | `5` (teto de `10`) |
 | `JOBFINDER_ANALYSIS_BATCH_SIZE` | Vagas enviadas por requisição ao Gemini (independente do limite por execução) | `5` (teto de `10`) |
+| `JOBFINDER_GEMINI_DAILY_QUOTA` | Cota diária de requisições ao Gemini, compartilhada entre execuções (limitada ao teto de `450`) | `450` |
+| `JOBFINDER_GEMINI_EXECUTIONS_PER_DAY` | Execuções programadas por dia (base da distribuição do orçamento) | `24` |
+| `JOBFINDER_GEMINI_MIN_INTERVAL_MS` | Intervalo mínimo entre requisições, em milissegundos (piso de `6000` em produção; `0` desativa fora dela) | `6000` |
+| `JOBFINDER_GEMINI_TPM_LIMIT` | Limite conservador de tokens de entrada por minuto (limitado ao teto de `250000`) | `250000` |
+| `JOBFINDER_GEMINI_TIME_BUDGET_MS` | Orçamento de tempo da análise, em milissegundos, desde o início do pipeline | `480000` |
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
@@ -190,6 +196,23 @@ A coleta do **LinkedIn** e do **Indeed** (via `ts-jobspy@3.0.1`) pode responder 
 - Ao detectar 429, as **pesquisas restantes daquele provider são interrompidas**, preservando as vagas já coletadas — inclusive as devolvidas pelo próprio retorno parcial. Os demais providers **continuam** normalmente.
 - **Não há retries adicionais** para 429: a interrupção é propagada e o tratamento permanece determinístico.
 - O helper `withRateLimitGuard` converte rejeições diretas de `scrapeJobs` em `RateLimitError`, cobrindo o caso em que a promessa rejeita antes de retornar resultados.
+
+## Controle de cota do Gemini
+
+O consumo da API Gemini é controlado de forma **persistente e compartilhada** entre execuções por `src/services/gemini-quota.ts`, evitando ultrapassar a cota gratuita diária.
+
+- **Cota diária configurável:** `JOBFINDER_GEMINI_DAILY_QUOTA` (padrão `450`, limitada ao **teto operacional** de `450` RPD). A renovação ocorre à **meia-noite do fuso `America/Los_Angeles`** (dia de cobrança da API), e não à meia-noite do UTC do runner. O "dia de cota" é gravado como `YYYY-MM-DD`.
+- **Reserva atômica, consultando o estado persistido:** cada requisição consome uma reserva obtida sobre o **estado persistido**. No **PostgreSQL**, a reserva ocorre em uma **transação** com **advisory lock** (`pg_advisory_xact_lock`), que serializa **todas** as execuções; no modo **JSON**, a seção crítica é serializada pelo mesmo lock usado nos históricos. A reserva avalia, na **mesma operação atômica**, a cota do dia, os **tokens por minuto** e o **intervalo mínimo** — execuções simultâneas (inclusive **entre gerenciadores** e na **virada do dia**) **nunca** ultrapassam esses limites.
+- **Tentativas contam:** a reserva acontece **antes** de cada requisição ao Gemini, portanto **falhas e eventuais retries também consomem cota**.
+- **Intervalo mínimo compartilhado:** `JOBFINDER_GEMINI_MIN_INTERVAL_MS` (padrão `6000` = 6 s) entre requisições, medido a partir da última requisição de **qualquer dia** — a **virada da meia-noite NÃO zera o intervalo** — **também entre execuções**. Quando o intervalo ainda não foi satisfeito, o gerenciador **aguarda o tempo restante a partir do estado persistido e re-tenta pelo mesmo controle**. Em produção o valor é elevado ao **piso** de `6000`.
+- **Tokens de entrada por minuto (TPM):** `JOBFINDER_GEMINI_TPM_LIMIT` (padrão e teto `250000`) limita os tokens de **entrada** por minuto, estimados de forma **conservadora** sobre o **prompt completo** (instrução de sistema + lote). Ao exceder o limite na janela de minuto, novas chamadas são interrompidas; a janela reinicia a cada minuto.
+- **Distribuição do orçamento:** o saldo diário restante é dividido pelas execuções ainda previstas no dia (`JOBFINDER_GEMINI_EXECUTIONS_PER_DAY`, padrão `24`), arredondado para cima. O saldo **não utilizado** por execuções anteriores é absorvido pelas seguintes.
+- **Ampliação do limite de vagas:** o limite de vagas por execução é `orçamento × tamanho do lote` (`JOBFINDER_ANALYSIS_BATCH_SIZE`), com `JOBFINDER_MAX_ANALYSES` como **piso**. O teto efetivo continua sendo a reserva atômica, que garante o limite diário.
+- **Orçamento de tempo desde o início do pipeline:** `JOBFINDER_GEMINI_TIME_BUDGET_MS` (padrão `480000` = 8 min) é contado **desde o início do pipeline** (coleta e esperas inclusas) e **revalidado antes de cada tentativa** (inclusive após uma espera), reservando margem (`CALL_RESERVE_MS`) para a chamada e o encerramento — abaixo do `timeout-minutes: 10` do GitHub Actions. Nenhuma chamada é emitida sem a margem.
+- **Revalidação do dia:** o dia de cota (e a janela de minuto) é **revalidado antes de cada reserva**, inclusive após esperas e na **virada da meia-noite**; a cota é contabilizada de forma independente por dia.
+- **Interrupção segura:** ao esgotar a cota, o orçamento da execução, os tokens ou o tempo — ou ao **falhar o controle** — o `acquire` lança `GeminiAnalysisError` e o pipeline interrompe **novas chamadas**, preservando o reaproveitamento do histórico salvo.
+- **Sem fallback silencioso:** arquivo de cota JSON vazio ou corrompido **lança erro** (não apaga nada); falha de persistência é tratada como `unavailable`, sem recorrer a outro backend.
+- **Persistência:** JSON em `data/gemini-quota.json` ou tabela `public.gemini_quota` (migração `supabase/migrations/20261120000000_create_gemini_quota.sql`, que inclui as colunas de tokens `token_minute`/`tokens_used`), conforme `JOBFINDER_STORAGE`.
 
 ## Versionamento das análises
 

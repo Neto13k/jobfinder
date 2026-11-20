@@ -33,11 +33,19 @@ jobs:
       NODE_ENV: production
       # Persistência na nuvem: nunca usar arquivos JSON locais no Actions.
       JOBFINDER_STORAGE: postgres
-      # Limite de novas análises por execução (respeita a cota gratuita do Gemini).
-      # Padrão 5 (teto de 10).
+      # Limite base de novas análises por execução; PISO do limite efetivo, que é
+      # ampliado pelo orçamento de requisições da cota (padrão 5, teto de 10).
       JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '5' }}
       # Vagas por requisição ao Gemini (padrão 5, teto de 10); independente do limite acima.
       JOBFINDER_ANALYSIS_BATCH_SIZE: ${{ vars.JOBFINDER_ANALYSIS_BATCH_SIZE || '5' }}
+      # Cota gratuita diária do Gemini e distribuição entre as execuções (cron horário).
+      JOBFINDER_GEMINI_DAILY_QUOTA: ${{ vars.JOBFINDER_GEMINI_DAILY_QUOTA || '450' }}
+      JOBFINDER_GEMINI_EXECUTIONS_PER_DAY: ${{ vars.JOBFINDER_GEMINI_EXECUTIONS_PER_DAY || '24' }}
+      # Intervalo mínimo entre requisições (ms), tokens de entrada por minuto (TPM)
+      # e orçamento de tempo da análise (ms, contado desde o início do pipeline).
+      JOBFINDER_GEMINI_MIN_INTERVAL_MS: ${{ vars.JOBFINDER_GEMINI_MIN_INTERVAL_MS || '6000' }}
+      JOBFINDER_GEMINI_TPM_LIMIT: ${{ vars.JOBFINDER_GEMINI_TPM_LIMIT || '250000' }}
+      JOBFINDER_GEMINI_TIME_BUDGET_MS: ${{ vars.JOBFINDER_GEMINI_TIME_BUDGET_MS || '480000' }}
       # Envios desativados por padrão; ativar via variável do repositório.
       JOBFINDER_SEND_NOTIFICATIONS: ${{ vars.JOBFINDER_SEND_NOTIFICATIONS || 'false' }}
       JOBFINDER_SEND_REVIEWS: ${{ vars.JOBFINDER_SEND_REVIEWS || 'false' }}

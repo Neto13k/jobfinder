@@ -561,6 +561,36 @@ export function buildBatchPrompt(
 }
 
 /**
+ * Estimativa CONSERVADORA de caracteres por token, usada no controle de TPM.
+ *
+ * Subestimar os caracteres por token superestima a contagem de tokens, de modo
+ * que o controle de tokens por minuto (TPM) permaneça abaixo do limite real da
+ * API. É uma heurística determinística, sem dependência externa.
+ */
+const PROMPT_CHARS_PER_TOKEN = 3;
+
+/**
+ * Estima os tokens de entrada de uma requisição em lote ao Gemini.
+ *
+ * Considera o PROMPT COMPLETO da requisição — a instrução de sistema
+ * (`SYSTEM_INSTRUCTION`) somada ao conteúdo do prompt do lote
+ * ({@link buildBatchPrompt}) — e aplica uma razão conservadora de caracteres por
+ * token ({@link PROMPT_CHARS_PER_TOKEN}). Serve ao controle de tokens de entrada
+ * por minuto (TPM), que reserva a requisição antes de emiti-la.
+ *
+ * @param jobs Vagas do lote.
+ * @returns Estimativa (arredondada para cima) dos tokens de entrada; 0 sem vagas.
+ */
+export function estimatePromptTokens(jobs: readonly Job[]): number {
+  if (jobs.length === 0) {
+    return 0;
+  }
+
+  const chars = SYSTEM_INSTRUCTION.length + buildBatchPrompt(jobs).length;
+  return Math.ceil(chars / PROMPT_CHARS_PER_TOKEN);
+}
+
+/**
  * Valida o JSON retornado pela IA em tempo de execução.
  *
  * Valida os quatro critérios (senioridade, tecnologias, localização e

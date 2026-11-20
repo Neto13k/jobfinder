@@ -7,7 +7,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "npm run build && node scripts/test-filters.mjs && node scripts/test-triage-filters.mjs && node scripts/test-ai-analyzer.mjs && node scripts/test-ai-batch.mjs && node scripts/test-analysis-batch-size.mjs && node scripts/test-analysis-versioning.mjs && node scripts/test-storage.mjs && node scripts/test-dispatch.mjs && node scripts/test-rate-limit.mjs && node scripts/test-board-timeout.mjs && node scripts/test-inhire.mjs && node scripts/test-job-sources.mjs && node scripts/test-process-jobs.mjs && node scripts/test-audit-report.mjs && node scripts/test-provider-normalization.mjs && node scripts/validate-linkedin.mjs && node scripts/validate-indeed.mjs",
+    "test": "npm run build && node scripts/test-filters.mjs && node scripts/test-triage-filters.mjs && node scripts/test-ai-analyzer.mjs && node scripts/test-ai-batch.mjs && node scripts/test-analysis-batch-size.mjs && node scripts/test-gemini-quota.mjs && node scripts/test-analysis-versioning.mjs && node scripts/test-storage.mjs && node scripts/test-dispatch.mjs && node scripts/test-rate-limit.mjs && node scripts/test-board-timeout.mjs && node scripts/test-inhire.mjs && node scripts/test-job-sources.mjs && node scripts/test-process-jobs.mjs && node scripts/test-audit-report.mjs && node scripts/test-provider-normalization.mjs && node scripts/validate-linkedin.mjs && node scripts/validate-indeed.mjs",
     "test:db": "npm run build && node --env-file=.env scripts/test-postgres-storage.mjs",
     "db:migrate": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
     "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
