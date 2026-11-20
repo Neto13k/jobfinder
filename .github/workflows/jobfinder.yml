@@ -34,7 +34,10 @@ jobs:
       # Persistência na nuvem: nunca usar arquivos JSON locais no Actions.
       JOBFINDER_STORAGE: postgres
       # Limite de novas análises por execução (respeita a cota gratuita do Gemini).
-      JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '1' }}
+      # Padrão 5 (teto de 10).
+      JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '5' }}
+      # Vagas por requisição ao Gemini (padrão 5, teto de 10); independente do limite acima.
+      JOBFINDER_ANALYSIS_BATCH_SIZE: ${{ vars.JOBFINDER_ANALYSIS_BATCH_SIZE || '5' }}
       # Envios desativados por padrão; ativar via variável do repositório.
       JOBFINDER_SEND_NOTIFICATIONS: ${{ vars.JOBFINDER_SEND_NOTIFICATIONS || 'false' }}
       JOBFINDER_SEND_REVIEWS: ${{ vars.JOBFINDER_SEND_REVIEWS || 'false' }}

@@ -13,10 +13,11 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Rotação de 22 lotes:** as 110 pesquisas de cada plataforma formam **22 lotes** (1 local + 4 remotas por hora UTC), com ciclo determinístico de **22 horas** (antes 20).
 - **Validações determinísticas do LinkedIn e do Indeed:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` validam localmente (sem rede) as matrizes e a rotação de cada plataforma e foram integrados ao `npm test`.
 - **Critérios de análise versionados:** `ANALYSIS_CRITERIA_VERSION` atualizado para `2026-11-20.1`, disparando a reanálise das vagas não notificadas sem apagar o histórico e preservando a deduplicação de notificações.
+- **Análise em lote no Gemini:** as vagas novas passam a ser enviadas ao Gemini em **lotes** por `generateContent` (não a Batch API) — **`5` vagas por requisição (padrão), com teto de `10`** — e o **limite de novas análises por execução** foi elevado para **`5` (padrão) e `10` (teto)** (`JOBFINDER_MAX_ANALYSES`). O tamanho do lote é configurado de forma **independente** por `JOBFINDER_ANALYSIS_BATCH_SIZE` e o saldo restante é recalculado antes de formar e enviar cada lote, de modo que `JOBFINDER_MAX_ANALYSES` nunca seja ultrapassado. Cada vaga é identificada por uma **chave única** (`source:id`) e validada **individualmente**; resultados ausentes, inválidos, com chave desconhecida ou duplicados **conflitantes** são descartados **sem invalidar os válidos**.
 
 ## Novidades da v2.1.0 (mantidas)
 
-- **Limite operacional de cinco análises por execução:** o Gemini analisa no máximo **cinco novas vagas por execução** (`JOBFINDER_MAX_ANALYSES`, teto de `5`), com padrão seguro de `1` análise por execução.
+- **Limite operacional de análises por execução:** o Gemini analisa no máximo **dez novas vagas por execução** (`JOBFINDER_MAX_ANALYSES`, teto `10`), com padrão de `5` análises por execução. *(Na v2.1.0 o padrão era `1` e o teto `5`; a v2.2.0 elevou ambos e passou a enviar as vagas em lotes.)*
 - **Correção da elegibilidade geográfica:** vagas remotas passaram a exigir evidência **explícita** de elegibilidade a candidatos residentes no Brasil (país, região LATAM/global, cidade/estado brasileiro reconhecido ou descrição que declare aceitar residentes no Brasil), e a **ausência** de restrição não era tratada como elegibilidade. *(Esta regra foi refinada na v2.2.0, que passou a presumir elegibilidade para vagas remotas sem restrição geográfica explícita — ver a seção "Novidades da v2.2.0".)*
 - **Expressões regulares geográficas centralizadas:** os padrões geográficos compartilhados por triagem e priorização foram reunidos em `src/config/geo-patterns.ts` (`location-filter.ts` e `job-priority.ts` importam o mesmo vocabulário), evitando divergência entre módulos.
 - **Normalização de acentos nos filtros:** o filtro de cargo (`filterDeveloperJobs`) normaliza títulos e palavras-chave com Unicode NFD, remoção de diacríticos e minúsculas, tornando a comparação insensível a acentos e maiúsculas.
@@ -54,7 +55,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
 - Priorização determinística (0–100) das vagas por stack, senioridade, localização, recência e contratação; ordena da maior para a menor pontuação, sem excluir oportunidades.
-- Análise de vagas com **limite operacional de cinco análises por execução** (`JOBFINDER_MAX_ANALYSES`, padrão `1`, teto `5`), por meio do Gemini, reaproveitando análises salvas.
+- Análise de vagas com **limite operacional de dez análises por execução** (`JOBFINDER_MAX_ANALYSES`, padrão `5`, teto `10`), por meio do Gemini, com envio em **lotes** dimensionados por `JOBFINDER_ANALYSIS_BATCH_SIZE` (padrão `5`, teto `10`, independente do limite por execução) e reaproveitamento de análises salvas.
 - Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
 - Notificações de vagas aprovadas via Telegram, quando habilitadas.
@@ -105,7 +106,8 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `TELEGRAM_BOT_TOKEN` | Token do bot | Necessário para enviar mensagens |
 | `TELEGRAM_CHAT_ID` | Chat de destino | Necessário para enviar mensagens |
 | `JOBFINDER_STORAGE` | Backend de histórico: `json` ou `postgres` | `json` |
-| `JOBFINDER_MAX_ANALYSES` | Número máximo de novas análises por execução | `1` (teto de `5`) |
+| `JOBFINDER_MAX_ANALYSES` | Número máximo de novas análises por execução | `5` (teto de `10`) |
+| `JOBFINDER_ANALYSIS_BATCH_SIZE` | Vagas enviadas por requisição ao Gemini (independente do limite por execução) | `5` (teto de `10`) |
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
@@ -204,7 +206,7 @@ Cada análise do Gemini é vinculada a uma **versão centralizada de critérios*
 - **Falhas de provider são isoladas:** cada fonte é coletada individualmente; a falha de uma não derruba as demais.
 - **Falhas do Gemini são categorizadas** (`classifyGeminiError`): `rate_limit`, `unavailable`, `timeout`, `auth`, `invalid` e `unknown`. Respostas vazias ou estruturalmente inválidas isolam apenas a vaga afetada; falhas **globais** (cota, indisponibilidade, rede, autenticação) interrompem **novas chamadas** à IA pelo resto da execução **sem parar o laço**: as análises já salvas continuam sendo reaproveitadas e as vagas pendentes ficam elegíveis para a próxima execução.
 - **Nenhuma falha vira análise válida:** uma análise malsucedida **não** é persistida nem notificada.
-- **Limite por tentativas:** `JOBFINDER_MAX_ANALYSES` limita **tentativas** (não apenas sucessos), impedindo repetição quando a API está indisponível ou com cota esgotada.
+- **Limite por tentativas:** `JOBFINDER_MAX_ANALYSES` limita **tentativas** (não apenas sucessos), impedindo repetição quando a API está indisponível ou com cota esgotada. No envio em lote, cada vaga do lote consome uma tentativa — mesmo quando a requisição falha — e o **saldo restante é recalculado antes de formar e enviar cada lote**, de modo que o limite por execução nunca seja ultrapassado (inclusive quando não é múltiplo do tamanho do lote). Resultados duplicados **conflitantes** para a mesma chave são descartados, preservando os demais resultados válidos.
 - **Contadores distintos no resumo:** `failedAnalyses` (falhas), `unanalyzedByLimit` (barradas pelo limite, com histórico consultado), `unanalyzedByGemini` (sem análise por indisponibilidade da IA) e `unscannedByLimit` (nem percorridas pelo limite).
 - **Encerramento explícito:** falhas de **banco**, **Gemini** ou **Telegram** interrompem a execução com código de saída diferente de zero; falhas individuais de provider são registradas e isoladas.
 
@@ -309,10 +311,10 @@ npm run build
 JOBFINDER_STORAGE=postgres JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
 ```
 
-**3. Analisar até três vagas novas, ainda sem enviar mensagens:**
+**3. Analisar até cinco vagas novas, ainda sem enviar mensagens:**
 
 ```bash
-JOBFINDER_MAX_ANALYSES=3 JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
+JOBFINDER_MAX_ANALYSES=5 JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
 ```
 
 **4. Permitir uma notificação normal por execução:**
@@ -321,7 +323,7 @@ JOBFINDER_MAX_ANALYSES=3 JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env
 JOBFINDER_SEND_NOTIFICATIONS=true JOBFINDER_SEND_REVIEWS=false node --env-file=.env dist/index.js
 ```
 
-> **Atenção:** os comandos de envio podem enviar uma mensagem **real** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. Na configuração atual, cada execução analisa **no máximo uma nova vaga** (padrão de `JOBFINDER_MAX_ANALYSES`) e envia **no máximo uma notificação**, com prioridade para vagas compatíveis. Se **não houver vagas elegíveis**, **nenhuma mensagem é enviada**.
+> **Atenção:** os comandos de envio podem enviar uma mensagem **real** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. Na configuração atual, cada execução analisa **no máximo cinco novas vagas** por padrão (`JOBFINDER_MAX_ANALYSES`, teto de dez) e envia **no máximo uma notificação**, com prioridade para vagas compatíveis. Se **não houver vagas elegíveis**, **nenhuma mensagem é enviada**.
 
 ## Automação com GitHub Actions
 
@@ -372,7 +374,8 @@ Em **Settings → Secrets and variables → Actions → Variables**, crie confor
 | Variável | Descrição | Padrão |
 |---|---|---|
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** | `false` |
-| `JOBFINDER_MAX_ANALYSES` | Novas análises por execução (1–5) | `1` |
+| `JOBFINDER_MAX_ANALYSES` | Novas análises por execução (5–10) | `5` |
+| `JOBFINDER_ANALYSIS_BATCH_SIZE` | Vagas por requisição ao Gemini (1–10) | `5` |
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Habilita envios reais | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Habilita avisos de revisão | `false` |
@@ -467,6 +470,8 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 |---|---|
 | `test-filters.mjs` | filtros de cargo (com normalização de acentos), senioridade e localização |
 | `test-ai-analyzer.mjs` | captura de dados, prompt, schema de resposta e coerência com a política de notificação |
+| `test-ai-batch.mjs` | análise em lote: dimensionamento (5/10), configuração independente do tamanho do lote, prompt com múltiplas vagas por chave única e validação individual das respostas (aproveitando apenas os válidos e descartando duplicados conflitantes) |
+| `test-analysis-batch-size.mjs` | dimensionamento em produção: limite não múltiplo do tamanho do lote, histórico intercalado e configuração independente de `JOBFINDER_ANALYSIS_BATCH_SIZE` |
 | `test-analysis-versioning.mjs` | reutilização estrita por `criteria_version` e histórico cumulativo |
 | `test-storage.mjs` | persistência JSON, reserva e propriedade (`reserved_by`), deduplicação |
 | `test-dispatch.mjs` | desfechos do despacho (confirmação, não entregue, resultado incerto, recuperação pendente) |
@@ -474,7 +479,7 @@ JOBFINDER_RUN_DB_TESTS=true npm run test:db
 | `test-board-timeout.mjs` | timeout de boards públicos (`BoardTimeoutError`) |
 | `test-inhire.mjs` | teto agregado de requisições, política de 3 timeouts consecutivos e reset |
 | `test-job-sources.mjs` | integridade da configuração de fontes/boards |
-| `test-process-jobs.mjs` | resiliência do `processJobs` (falha global do Gemini, reuso de análises, limite por tentativas, ausência de persistência/envio em falhas) |
+| `test-process-jobs.mjs` | resiliência do `processJobs` em lotes (falha global do Gemini, reuso de análises, limite de tentativas por vaga do lote e aproveitamento dos resultados válidos sem persistir/enviar falhas) |
 | `validate-linkedin.mjs` (modo local) | matriz de 110 pesquisas do LinkedIn (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 | `validate-indeed.mjs` (modo local) | matriz de 110 pesquisas do Indeed (22 locais + 88 remotas), rotação de 22 lotes (1 local + 4 remotas por hora UTC), determinismo e ciclo de 22 h, sem rede |
 
@@ -483,7 +488,7 @@ Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL
 **Resultados das validações realizadas:**
 
 - **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
-- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire, resiliência do pipeline e as matrizes/rotações do LinkedIn e do Indeed.
+- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, versionamento das análises, análise em lote (dimensionamento configurável e independente, prompt e validação individual), limite não múltiplo do tamanho do lote com histórico intercalado, persistência JSON com reserva e propriedade, rate limiting, timeout de boards, integração InHire, resiliência do pipeline e as matrizes/rotações do LinkedIn e do Indeed.
 - **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
 - **Validação dos providers:** `scripts/validate-linkedin.mjs` e `scripts/validate-indeed.mjs` rodam por padrão em **modo local e determinístico** (validam as matrizes de 110 pesquisas e a rotação dos 22 lotes de cada plataforma, sem rede) e são executados por `npm test`. Para o LinkedIn, a coleta real é manual e explícita: `node scripts/validate-linkedin.mjs --collect` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção da coleta.
 

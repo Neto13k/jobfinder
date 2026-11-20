@@ -22,12 +22,13 @@ const originalCwd = process.cwd();
 delete process.env.JOBFINDER_STORAGE;
 delete process.env.JOBFINDER_SEND_NOTIFICATIONS;
 delete process.env.JOBFINDER_SEND_REVIEWS;
-process.env.JOBFINDER_MAX_ANALYSES = "1";
+process.env.JOBFINDER_MAX_ANALYSES = "5";
 
 const { runPipeline } = await import("../dist/index.js");
 const { buildAuditReport, runAudit } = await import(
   "../dist/services/audit-report.js"
 );
+const { generateJobKey } = await import("../dist/services/deduplication.js");
 
 const tempDir = await mkdtemp(join(tmpdir(), "jobfinder-audit-"));
 process.chdir(tempDir);
@@ -470,7 +471,7 @@ test("modo de auditoria grava o relatório e interrompe antes da análise", asyn
       auditOnly: true,
       referenceDate: REFERENCE,
       dependencies: {
-        analyze: async () => {
+        analyzeBatch: async () => {
           analyzeCalls++;
           throw new Error("a análise não deveria ser chamada na auditoria");
         },
@@ -503,9 +504,12 @@ test("execução normal segue analisando e não é afetada pelo modo de auditori
     const summary = await runPipeline(rawJobs, {
       auditOnly: false,
       dependencies: {
-        analyze: async () => {
+        analyzeBatch: async (batchJobs) => {
           analyzeCalls++;
-          return analysis({ score: 70 });
+          // Devolve o resultado do primeiro lote como mapa chave → análise.
+          return new Map([
+            [generateJobKey(batchJobs[0]), analysis({ score: 70 })],
+          ]);
         },
         notify: async () => true,
       },

@@ -4,11 +4,12 @@
 //        node scripts/test-process-jobs.mjs
 //
 // Roda em diretório temporário (backend JSON), sem tocar no data/ real, no
-// Gemini nem no Telegram: a análise de IA e o despacho de notificação são
-// injetados como dependências falsas. Valida o COMPORTAMENTO EFETIVO do laço:
-// a falha global da IA impede novas chamadas sem interromper o processamento,
-// as análises salvas continuam sendo reaproveitadas, o limite é contabilizado
-// por tentativas e nenhuma falha é persistida ou notificada.
+// Gemini nem no Telegram: a análise de IA (em lote) e o despacho de notificação
+// são injetados como dependências falsas. Valida o COMPORTAMENTO EFETIVO do
+// laço: a falha global da IA impede novas chamadas sem interromper o
+// processamento, as análises salvas continuam sendo reaproveitadas, o limite é
+// contabilizado por tentativas (uma por vaga do lote) e nenhuma falha é
+// persistida ou notificada.
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -22,9 +23,9 @@ const originalCwd = process.cwd();
 delete process.env.JOBFINDER_STORAGE;
 process.env.JOBFINDER_SEND_NOTIFICATIONS = "true";
 delete process.env.JOBFINDER_SEND_REVIEWS;
-// Duas tentativas por execução: suficiente para observar falha + sucesso na
-// mesma execução e para provar que a falha consome o limite de tentativas.
-process.env.JOBFINDER_MAX_ANALYSES = "2";
+// Dez análises por execução (teto): com lotes de 5 vagas, permite observar dois
+// lotes e provar que a falha consome o limite de tentativas por vaga do lote.
+process.env.JOBFINDER_MAX_ANALYSES = "10";
 
 const { processJobs } = await import("../dist/index.js");
 const { GeminiAnalysisError } = await import("../dist/services/ai-analyzer.js");
@@ -98,14 +99,16 @@ async function readHistory() {
 
 test("falha global da IA interrompe novas chamadas sem parar o laço", async () => {
   await withTempDir(async () => {
-    const jobs = [job({ id: "a" }), job({ id: "b" }), job({ id: "c" })];
-    let analyzeCalls = 0;
+    const jobs = Array.from({ length: 7 }, (_, index) =>
+      job({ id: `job-${index}` }),
+    );
+    let batchCalls = 0;
     let notifyCalls = 0;
 
     const summary = await processJobs(jobs, {
-      analyze: async () => {
-        analyzeCalls++;
-        // Cota esgotada: falha global, não específica dos dados da vaga.
+      analyzeBatch: async () => {
+        batchCalls++;
+        // Cota esgotada: falha global, não específica dos dados das vagas.
         throw new GeminiAnalysisError("rate_limit", "cota esgotada");
       },
       notify: async () => {
@@ -114,10 +117,11 @@ test("falha global da IA interrompe novas chamadas sem parar o laço", async () 
       },
     });
 
-    // Só a primeira vaga chama a IA; as demais são contabilizadas como não
-    // analisadas por indisponibilidade, sem interromper o laço.
-    assert.equal(analyzeCalls, 1);
-    assert.equal(summary.failedAnalyses, 1);
+    // Só o primeiro lote (5 vagas) chega a chamar a IA; as demais são
+    // contabilizadas como não analisadas por indisponibilidade, sem interromper
+    // o laço. A falha consome as tentativas de todas as vagas do lote.
+    assert.equal(batchCalls, 1);
+    assert.equal(summary.failedAnalyses, 5);
     assert.equal(summary.unanalyzedByGemini, 2);
     assert.equal(summary.unanalyzedByLimit, 0);
     assert.equal(summary.analyzed, 0);
@@ -132,17 +136,17 @@ test("análises salvas continuam sendo reaproveitadas após a IA ficar indispon�
     await history.markJobAsAnalyzed(savedJob, analysis({ score: 77 }));
 
     const jobs = [job({ id: "fresh" }), savedJob, job({ id: "later" })];
-    let analyzeCalls = 0;
+    let batchCalls = 0;
 
     const summary = await processJobs(jobs, {
-      analyze: async () => {
-        analyzeCalls++;
+      analyzeBatch: async () => {
+        batchCalls++;
         throw new GeminiAnalysisError("unavailable", "IA fora do ar");
       },
       notify: async () => true,
     });
 
-    assert.equal(analyzeCalls, 1);
+    assert.equal(batchCalls, 1);
     assert.equal(summary.failedAnalyses, 1);
     // Mesmo com a IA bloqueada, a análise salva é recuperada do histórico.
     assert.equal(summary.recovered, 1);
@@ -150,41 +154,44 @@ test("análises salvas continuam sendo reaproveitadas após a IA ficar indispon�
   });
 });
 
-test("o limite de análises conta tentativas, não apenas sucessos", async () => {
+test("o limite de análises conta tentativas por vaga, não apenas sucessos", async () => {
   await withTempDir(async () => {
-    const jobs = [job({ id: "x" }), job({ id: "y" }), job({ id: "z" })];
-    let analyzeCalls = 0;
+    const jobs = Array.from({ length: 12 }, (_, index) =>
+      job({ id: `limit-${index}` }),
+    );
+    let batchCalls = 0;
 
     const summary = await processJobs(jobs, {
-      analyze: async () => {
-        analyzeCalls++;
-        // Falha específica dos dados: isola a vaga e permite seguir para a
-        // próxima, mas ainda assim consome uma tentativa do limite.
+      analyzeBatch: async () => {
+        batchCalls++;
+        // Falha específica do lote (resposta inválida): isola o lote e permite
+        // seguir para o próximo, mas ainda assim consome as tentativas.
         throw new GeminiAnalysisError("invalid", "resposta inválida");
       },
       notify: async () => true,
     });
 
-    // As duas tentativas (x e y) esgotam o limite; z nem chega a chamar a IA.
-    assert.equal(analyzeCalls, 2);
-    assert.equal(summary.failedAnalyses, 2);
-    assert.equal(summary.unanalyzedByLimit, 1);
+    // Dois lotes (5 + 5 = 10 tentativas) esgotam o limite; as duas vagas
+    // restantes nem chegam a chamar a IA.
+    assert.equal(batchCalls, 2);
+    assert.equal(summary.failedAnalyses, 10);
+    assert.equal(summary.unanalyzedByLimit, 2);
     assert.equal(summary.analyzed, 0);
   });
 });
 
-test("nenhuma análise malsucedida é persistida nem notificada", async () => {
+test("aproveita os resultados válidos e não persiste nem notifica os inválidos", async () => {
   await withTempDir(async () => {
     const failed = job({ id: "fail" });
     const ok = job({ id: "ok" });
     const notified = [];
 
     const summary = await processJobs([failed, ok], {
-      analyze: async (target) => {
-        if (target.id === "fail") {
-          throw new GeminiAnalysisError("invalid", "resposta inválida");
-        }
-        return analysis({ score: 91 });
+      analyzeBatch: async () => {
+        // Simula a resposta da IA com apenas o resultado válido: a vaga "fail"
+        // fica ausente do mapa (inválida/desconhecida) e é descartada sem
+        // invalidar o resultado válido.
+        return new Map([[dedup.generateJobKey(ok), analysis({ score: 91 })]]);
       },
       notify: async (candidate, kind) => {
         notified.push({ id: candidate.job.id, kind });

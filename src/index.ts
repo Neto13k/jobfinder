@@ -10,8 +10,10 @@ import { fetchLeverJobs } from "./providers/lever.js";
 import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
 import {
-  analyzeJob,
+  analyzeJobs,
   GeminiAnalysisError,
+  resolveBatchSize,
+  resolveConfiguredBatchSize,
   type JobAnalysis,
 } from "./services/ai-analyzer.js";
 import {
@@ -22,6 +24,7 @@ import { runAudit } from "./services/audit-report.js";
 import { classifyJobContract, filterByContract } from "./services/contract-filter.js";
 import {
   deduplicateJobs,
+  generateJobKey,
   groupEquivalentJobs,
   isJobNotified,
 } from "./services/deduplication.js";
@@ -68,9 +71,9 @@ const SEND_NOTIFICATIONS = process.env.JOBFINDER_SEND_NOTIFICATIONS === "true";
 const SEND_REVIEWS =
   SEND_NOTIFICATIONS && process.env.JOBFINDER_SEND_REVIEWS === "true";
 
-// Limite de novas análises por execução: padrão 1, teto de 5.
-const DEFAULT_MAX_ANALYSES = 1;
-const HARD_MAX_ANALYSES = 5;
+// Limite de novas análises por execução: padrão 5, teto de 10.
+const DEFAULT_MAX_ANALYSES = 5;
+const HARD_MAX_ANALYSES = 10;
 
 /**
  * Lê JOBFINDER_MAX_ANALYSES aceitando apenas inteiro positivo dentro do teto.
@@ -93,6 +96,12 @@ function parseMaxAnalyses(raw: string | undefined): number {
 }
 
 const MAX_ANALYSES = parseMaxAnalyses(process.env.JOBFINDER_MAX_ANALYSES);
+
+// Vagas enviadas numa única requisição ao Gemini
+// (JOBFINDER_ANALYSIS_BATCH_SIZE; padrão 5, teto de 10). É INDEPENDENTE do
+// limite por execução; cada lote é ainda limitado ao saldo de tentativas
+// restante, recalculado antes de formar e enviar cada requisição.
+const BATCH_SIZE = resolveConfiguredBatchSize();
 
 /** Máximo de exemplos de vagas exibidos por categoria nos logs de filtros. */
 const MAX_LOG_EXAMPLES = 5;
@@ -304,8 +313,12 @@ async function fetchRotatedBatches(
  * deduplicação e limiares) exatamente como em produção.
  */
 export interface ProcessDependencies {
-  /** Analisa uma vaga; deve lançar GeminiAnalysisError em falha. */
-  analyze: (job: Job) => Promise<JobAnalysis>;
+  /**
+   * Analisa um LOTE de vagas numa única requisição e devolve as análises
+   * válidas indexadas pela chave "source:id". Deve lançar GeminiAnalysisError
+   * em falha global (cota, indisponibilidade, rede, autenticação).
+   */
+  analyzeBatch: (jobs: Job[]) => Promise<Map<string, JobAnalysis>>;
   /** Reserva e envia a notificação; devolve false se já estava reservada. */
   notify: (
     candidate: NotificationCandidate,
@@ -315,7 +328,7 @@ export interface ProcessDependencies {
 
 /** Dependências reais usadas em produção. */
 const DEFAULT_DEPENDENCIES: ProcessDependencies = {
-  analyze: analyzeJob,
+  analyzeBatch: analyzeJobs,
   notify: (candidate, kind) => notifyWithReservation(candidate, kind),
 };
 
@@ -325,6 +338,18 @@ const DEFAULT_DEPENDENCIES: ProcessDependencies = {
  * Analisa até MAX_ANALYSES vagas novas, reaproveita análises salvas (inclusive
  * as marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
  * notificação por execução, priorizando as vagas compatíveis.
+ *
+ * As vagas novas são enviadas ao Gemini em LOTES por `generateContent` (não a
+ * Batch API): até BATCH_SIZE vagas por requisição (JOBFINDER_ANALYSIS_BATCH_SIZE;
+ * padrão 5, teto de 10), independente do limite por execução. O saldo restante
+ * de tentativas é recalculado ANTES de formar e enviar cada lote, de modo que
+ * MAX_ANALYSES nunca seja ultrapassado — inclusive quando o limite não é
+ * múltiplo do tamanho do lote. O histórico é consultado ANTES de incluir a vaga
+ * no lote, e cada resultado é validado individualmente, aproveitando os válidos
+ * mesmo quando faltam, são inválidos, trazem chaves desconhecidas ou duplicam a
+ * mesma chave de forma conflitante. O lote pendente é resolvido antes de uma
+ * vaga recuperada de prioridade posterior, preservando a ordem de prioridade na
+ * escolha do candidato a notificação.
  *
  * Quando a IA fica indisponível (falha global, não específica dos dados da
  * vaga), novas chamadas ao Gemini são interrompidas pelo restante da execução,
@@ -391,98 +416,32 @@ export async function processJobs(
   // elegíveis para a próxima execução.
   let geminiBlocked = false;
 
-  for (const job of jobs) {
-    // Limite de chamadas atingido: só continua se ainda houver envio pendente.
-    if (analysesUsed >= MAX_ANALYSES) {
-      if (!SEND_NOTIFICATIONS || compatibleCandidate) {
-        // As vagas restantes nem chegam a ter o histórico consultado.
-        summary.unscannedByLimit = jobs.length - processed;
-        break;
-      }
-    }
+  // Vagas acumuladas para a próxima requisição em lote ao Gemini
+  // (`generateContent` com múltiplas vagas, não a Batch API).
+  let batch: Job[] = [];
 
-    processed++;
+  /** Saldo de tentativas ainda disponível nesta execução (nunca negativo). */
+  const remainingBalance = (): number =>
+    Math.max(0, MAX_ANALYSES - analysesUsed);
 
-    // Vaga já notificada/reservada: não é analisada nem notificada de novo.
-    if (await isJobNotified(job)) {
-      skipCounts.already_notified++;
-      continue;
-    }
+  /**
+   * Vagas permitidas no próximo lote: o menor valor entre o tamanho
+   * configurado e o saldo restante. Recalculado antes de formar e enviar cada
+   * lote para que `JOBFINDER_MAX_ANALYSES` nunca seja ultrapassado.
+   */
+  const batchCapacity = (): number =>
+    resolveBatchSize(remainingBalance(), BATCH_SIZE);
 
-    // Reaproveita a análise salva apenas se ela for da versão vigente dos
-    // critérios; análises antigas ou legadas são refeitas.
-    let analysis: JobAnalysis | undefined = await getReusableAnalysis(job);
-    let origin: "nova" | "recuperada" = "recuperada";
-
-    if (!analysis) {
-      // IA indisponível nesta execução: não faz novas chamadas. A vaga fica
-      // pendente e será reprocessada numa próxima execução.
-      if (geminiBlocked) {
-        summary.unanalyzedByGemini++;
-        continue;
-      }
-
-      // Sem resultado salvo e limite atingido: não chama o Gemini.
-      if (analysesUsed >= MAX_ANALYSES) {
-        // Histórico consultado, mas a vaga fica efetivamente sem análise.
-        summary.unanalyzedByLimit++;
-        continue;
-      }
-
-      origin = "nova";
-      console.log(`Analisando: ${job.title} (${job.company})`);
-
-      // Contabiliza a tentativa antes da chamada, mesmo se ela falhar.
-      analysesUsed++;
-
-      try {
-        analysis = await deps.analyze(job);
-      } catch (error) {
-        summary.failedAnalyses++;
-        const kind =
-          error instanceof GeminiAnalysisError ? error.kind : "unknown";
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(
-          `Falha na análise de ${job.title} (${job.company}) | ` +
-            `categoria: ${kind} | ${message}`,
-        );
-
-        // Falha específica dos dados da vaga (resposta vazia/estruturalmente
-        // inválida): isola apenas esta vaga e segue para a próxima.
-        if (kind === "invalid") {
-          continue;
-        }
-
-        // Cota, indisponibilidade, rede ou autenticação: impede novas chamadas
-        // ao Gemini nesta execução, sem interromper o laço. As análises salvas
-        // seguem sendo reaproveitadas e as vagas pendentes serão reprocessadas
-        // na próxima execução. Nenhuma falha é registrada como análise válida.
-        if (!geminiBlocked) {
-          geminiBlocked = true;
-          console.error(
-            "Novas análises interrompidas nesta execução (IA indisponível); " +
-              "as análises salvas continuam sendo reutilizadas e as vagas " +
-              "pendentes serão reprocessadas na próxima execução.",
-          );
-        }
-        continue;
-      }
-
-      // Salva a nova análise imediatamente, inclusive as compatíveis.
-      await markJobAsAnalyzed(job, analysis);
-      summary.analyzed++;
-
-      if (analysis.decision === "compatible") {
-        summary.compatible++;
-      } else if (analysis.decision === "incompatible") {
-        summary.incompatible++;
-      } else {
-        summary.review++;
-      }
-    } else {
-      summary.recovered++;
-    }
-
+  /**
+   * Avalia uma vaga já resolvida (nova ou recuperada do histórico): registra o
+   * resultado e decide se ela vira candidata a notificação. É chamada em ORDEM
+   * de prioridade para preservar a escolha do primeiro compatível.
+   */
+  const handleResolved = (
+    job: Job,
+    analysis: JobAnalysis,
+    origin: "nova" | "recuperada",
+  ): void => {
     const published = job.publishedAt
       ? ` | publicado em ${job.publishedAt}`
       : "";
@@ -525,7 +484,158 @@ export async function processJobs(
     } else {
       registerSkip(job, "incompatible");
     }
+  };
+
+  /**
+   * Envia o lote pendente numa única requisição (`generateContent`) e processa
+   * cada vaga individualmente.
+   *
+   * Antes de enviar, recalcula o saldo restante e limita o lote a ele, de modo
+   * que `MAX_ANALYSES` nunca seja ultrapassado. Cada vaga é identificada pela
+   * chave "source:id"; resultados ausentes, inválidos, com chave desconhecida ou
+   * duplicados conflitantes consomem a tentativa da vaga, mas são descartados
+   * sem invalidar os resultados válidos nem o restante da execução. Uma falha
+   * global (cota, indisponibilidade, rede ou autenticação) interrompe as
+   * próximas requisições, preservando as análises salvas e deixando as vagas
+   * pendentes para a próxima execução.
+   */
+  const flushBatch = async (): Promise<void> => {
+    if (batch.length === 0) {
+      return;
+    }
+
+    // Recalcula o saldo ANTES de enviar: o lote nunca ultrapassa MAX_ANALYSES,
+    // mesmo que o tamanho configurado seja maior que o saldo restante.
+    const current = batch.slice(0, batchCapacity());
+    batch = batch.slice(current.length);
+    if (current.length === 0) {
+      return;
+    }
+
+    for (const job of current) {
+      console.log(`Analisando: ${job.title} (${job.company})`);
+    }
+
+    // Contabiliza as tentativas antes da chamada, mesmo se ela falhar.
+    analysesUsed += current.length;
+
+    let results: Map<string, JobAnalysis>;
+    try {
+      results = await deps.analyzeBatch(current);
+    } catch (error) {
+      summary.failedAnalyses += current.length;
+      const kind =
+        error instanceof GeminiAnalysisError ? error.kind : "unknown";
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Falha na análise do lote de ${current.length} vaga(s) | ` +
+          `categoria: ${kind} | ${message}`,
+      );
+
+      // Falha específica do lote (resposta vazia/estruturalmente inválida):
+      // isola o lote e segue para as vagas seguintes.
+      if (kind === "invalid") {
+        return;
+      }
+
+      // Cota, indisponibilidade, rede ou autenticação: impede novas chamadas
+      // ao Gemini nesta execução, sem interromper o laço. As análises salvas
+      // seguem sendo reaproveitadas e as vagas pendentes serão reprocessadas
+      // na próxima execução. Nenhuma falha é registrada como análise válida.
+      if (!geminiBlocked) {
+        geminiBlocked = true;
+        console.error(
+          "Novas análises interrompidas nesta execução (IA indisponível); " +
+            "as análises salvas continuam sendo reutilizadas e as vagas " +
+            "pendentes serão reprocessadas na próxima execução.",
+        );
+      }
+      return;
+    }
+
+    for (const job of current) {
+      const analysis = results.get(generateJobKey(job));
+
+      // Resultado ausente, inválido ou com chave não reconhecida: a vaga fica
+      // sem análise e será reprocessada numa próxima execução.
+      if (!analysis) {
+        summary.failedAnalyses++;
+        console.error(
+          `Análise ausente ou inválida para ${job.title} (${job.company}).`,
+        );
+        continue;
+      }
+
+      // Salva a nova análise imediatamente, inclusive as compatíveis.
+      await markJobAsAnalyzed(job, analysis);
+      summary.analyzed++;
+
+      if (analysis.decision === "compatible") {
+        summary.compatible++;
+      } else if (analysis.decision === "incompatible") {
+        summary.incompatible++;
+      } else {
+        summary.review++;
+      }
+
+      handleResolved(job, analysis, "nova");
+    }
+  };
+
+  for (const job of jobs) {
+    // Limite de chamadas atingido: só continua se ainda houver envio pendente.
+    if (analysesUsed >= MAX_ANALYSES) {
+      if (!SEND_NOTIFICATIONS || compatibleCandidate) {
+        // As vagas restantes nem chegam a ter o histórico consultado.
+        summary.unscannedByLimit = jobs.length - processed;
+        break;
+      }
+    }
+
+    processed++;
+
+    // Vaga já notificada/reservada: não é analisada nem notificada de novo.
+    if (await isJobNotified(job)) {
+      skipCounts.already_notified++;
+      continue;
+    }
+
+    // Reaproveita a análise salva apenas se ela for da versão vigente dos
+    // critérios; análises antigas ou legadas são refeitas.
+    const analysis = await getReusableAnalysis(job);
+    if (analysis) {
+      // Preserva a ordem de prioridade: resolve o lote pendente (vagas mais
+      // prioritárias) antes de avaliar esta vaga recuperada.
+      await flushBatch();
+      summary.recovered++;
+      handleResolved(job, analysis, "recuperada");
+      continue;
+    }
+
+    // IA indisponível nesta execução: não faz novas chamadas. A vaga fica
+    // pendente e será reprocessada numa próxima execução.
+    if (geminiBlocked) {
+      summary.unanalyzedByGemini++;
+      continue;
+    }
+
+    // Sem resultado salvo e limite atingido: não chama o Gemini.
+    if (analysesUsed >= MAX_ANALYSES) {
+      // Histórico consultado, mas a vaga fica efetivamente sem análise.
+      summary.unanalyzedByLimit++;
+      continue;
+    }
+
+    // Acumula a vaga para a próxima requisição em lote e envia quando o lote
+    // atinge o tamanho permitido: o configurado, limitado ao saldo restante.
+    batch.push(job);
+    if (batch.length >= batchCapacity()) {
+      await flushBatch();
+    }
   }
+
+  // Envia o lote final (parcial), se houver.
+  await flushBatch();
 
   // Uma notificação por execução: compatível antes de revisão manual.
   if (compatibleCandidate) {
@@ -652,6 +762,7 @@ export async function runPipeline(
   console.log(`Após contratação: ${contractJobs.length}`);
   console.log(`Armazenamento: ${getStorageBackend()}`);
   console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
+  console.log(`Vagas por requisição ao Gemini (lote): ${BATCH_SIZE}`);
 
   // Detalhamento dos descartes de cada filtro, com exemplos.
   console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
