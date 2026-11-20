@@ -4,7 +4,8 @@
 //        node scripts/test-dispatch.mjs
 //
 // Roda em diretório temporário (backend JSON) e injeta envios falsos para
-// simular os desfechos de envio sem acionar o Telegram real.
+// simular os desfechos de envio sem acionar o Telegram real. Cobre também a
+// reserva atômica sob concorrência (duas execuções não duplicam o envio).
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -135,5 +136,25 @@ test("reserva pendente abandonada pode ser resolvida manualmente", async () => {
   );
 
   assert.equal(await dedup.resolvePendingReservation(reservation.key, "sent"), true);
+  assert.equal(await dedup.isJobNotified(target), true);
+});
+
+test("execuções concorrentes não duplicam o envio da mesma vaga", async () => {
+  const target = job({ id: "concurrent" });
+  let sends = 0;
+  const send = async () => {
+    sends++;
+  };
+
+  // Duas execuções disputam a mesma vaga ao mesmo tempo.
+  const [first, second] = await Promise.all([
+    notifyWithReservation({ job: target, analysis }, "compatible", { send }),
+    notifyWithReservation({ job: target, analysis }, "compatible", { send }),
+  ]);
+
+  // A reserva atômica garante um único envio; a outra execução vê a vaga já
+  // reservada e não envia.
+  assert.equal(sends, 1);
+  assert.equal([first, second].filter(Boolean).length, 1);
   assert.equal(await dedup.isJobNotified(target), true);
 });

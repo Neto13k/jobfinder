@@ -61,7 +61,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
 - Notificações de vagas aprovadas via Telegram, quando habilitadas.
 - Alertas opcionais de **revisão manual** para vagas possivelmente compatíveis cuja decisão não é confirmada (decisão `review` da IA ou localização/contratação indefinidas), sem apresentá-las como confirmadas.
-- Execução **manual** (local) e **agendada** (GitHub Actions, desativada por padrão), com limite de **uma notificação por execução**.
+- Execução **manual** (local) e **agendada** (GitHub Actions, desativada por padrão), com limite de **`JOBFINDER_MAX_NOTIFICATIONS`** notificações por execução (padrão `3`, teto `10`), sempre priorizando as vagas **compatíveis** antes das de **revisão manual** e respeitando a ordem de prioridade dentro de cada grupo.
 - **Sem envio quando não há vagas elegíveis:** se nenhuma vaga passar pelos filtros, pela análise e pela política de notificação (ou se todas já tiverem sido notificadas), **nenhuma mensagem é enviada**.
 
 O JobFinder **não** envia currículos, não se candidata a vagas e não confirma por conta própria que os processos seletivos permanecem abertos.
@@ -117,6 +117,7 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
+| `JOBFINDER_MAX_NOTIFICATIONS` | Limite de notificações por execução (compatíveis antes das de revisão) | `3` (teto de `10`) |
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** do GitHub Actions | `false` |
 | `DATABASE_URL` | Conexão PostgreSQL do Supabase | Obrigatória no modo `postgres` |
 | `DATABASE_CA_CERT_PATH` | Caminho do certificado CA do Supabase | `./certs/prod-ca-2021.crt` |
@@ -340,13 +341,13 @@ JOBFINDER_STORAGE=postgres JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.e
 JOBFINDER_MAX_ANALYSES=5 JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
 ```
 
-**4. Permitir uma notificação normal por execução:**
+**4. Permitir até três notificações por execução:**
 
 ```bash
 JOBFINDER_SEND_NOTIFICATIONS=true JOBFINDER_SEND_REVIEWS=false node --env-file=.env dist/index.js
 ```
 
-> **Atenção:** os comandos de envio podem enviar uma mensagem **real** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. Na configuração atual, cada execução analisa **no máximo cinco novas vagas** por padrão (`JOBFINDER_MAX_ANALYSES`, teto de dez) e envia **no máximo uma notificação**, com prioridade para vagas compatíveis. Se **não houver vagas elegíveis**, **nenhuma mensagem é enviada**.
+> **Atenção:** os comandos de envio podem enviar mensagens **reais** ao Telegram. Antes de utilizá-los, confirme as credenciais, o chat de destino e as regras de seleção. Na configuração atual, cada execução analisa **no máximo cinco novas vagas** por padrão (`JOBFINDER_MAX_ANALYSES`, teto de dez) e envia **até `JOBFINDER_MAX_NOTIFICATIONS` notificações** (padrão `3`, teto `10`), sempre priorizando as vagas compatíveis antes das de revisão manual. Uma falha individual de envio não impede as demais, e apenas envios aceitos consomem o limite. Se **não houver vagas elegíveis**, **nenhuma mensagem é enviada**.
 
 ## Automação com GitHub Actions
 
@@ -402,6 +403,7 @@ Em **Settings → Secrets and variables → Actions → Variables**, crie confor
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Habilita envios reais | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Habilita avisos de revisão | `false` |
+| `JOBFINDER_MAX_NOTIFICATIONS` | Notificações por execução (1–10) | `3` |
 
 Para ativar o agendamento, defina `JOBFINDER_AUTOMATION_ENABLED=true`. Para ativar os envios, defina também `JOBFINDER_SEND_NOTIFICATIONS=true` **conscientemente**, após validar as credenciais. A execução manual (`workflow_dispatch`) não depende de `JOBFINDER_AUTOMATION_ENABLED`.
 
@@ -440,7 +442,7 @@ Fontes (Greenhouse, Lever, Ashby, InHire, LinkedIn Jobs, Indeed Jobs)
       Reserva antes do envio           Sem alerta
              |
              v
-      Telegram (até 1 envio)
+      Telegram (até JOBFINDER_MAX_NOTIFICATIONS)
              |
      +-------+-----------------------------+
      |                  |                  |

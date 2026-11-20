@@ -49,6 +49,9 @@ jobs:
       # Envios desativados por padrão; ativar via variável do repositório.
       JOBFINDER_SEND_NOTIFICATIONS: ${{ vars.JOBFINDER_SEND_NOTIFICATIONS || 'false' }}
       JOBFINDER_SEND_REVIEWS: ${{ vars.JOBFINDER_SEND_REVIEWS || 'false' }}
+      # Limite de notificações por execução (padrão 3, teto de 10): compatíveis
+      # antes das de revisão manual, respeitando a ordem de prioridade.
+      JOBFINDER_MAX_NOTIFICATIONS: ${{ vars.JOBFINDER_MAX_NOTIFICATIONS || '3' }}
       # Certificado TLS público versionado no repositório.
       DATABASE_CA_CERT_PATH: ./certs/prod-ca-2021.crt
       # Segredos: nunca são impressos nos logs (mascarados pelo Actions).

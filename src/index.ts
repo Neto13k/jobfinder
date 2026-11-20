@@ -102,6 +102,35 @@ function parseMaxAnalyses(raw: string | undefined): number {
 
 const MAX_ANALYSES = parseMaxAnalyses(process.env.JOBFINDER_MAX_ANALYSES);
 
+// Limite de notificações por execução: padrão 3, teto de 10.
+const DEFAULT_MAX_NOTIFICATIONS = 3;
+const HARD_MAX_NOTIFICATIONS = 10;
+
+/**
+ * Lê JOBFINDER_MAX_NOTIFICATIONS aceitando apenas inteiro positivo dentro do teto.
+ *
+ * Valores ausentes, não numéricos ou abaixo de 1 recorrem ao padrão seguro; o
+ * teto operacional é {@link HARD_MAX_NOTIFICATIONS}.
+ */
+function parseMaxNotifications(raw: string | undefined): number {
+  const trimmed = raw?.trim() ?? "";
+
+  if (!/^\d+$/.test(trimmed)) {
+    return DEFAULT_MAX_NOTIFICATIONS;
+  }
+
+  const value = Number(trimmed);
+  if (value < 1) {
+    return DEFAULT_MAX_NOTIFICATIONS;
+  }
+
+  return Math.min(value, HARD_MAX_NOTIFICATIONS);
+}
+
+const MAX_NOTIFICATIONS = parseMaxNotifications(
+  process.env.JOBFINDER_MAX_NOTIFICATIONS,
+);
+
 // Vagas enviadas numa única requisição ao Gemini
 // (JOBFINDER_ANALYSIS_BATCH_SIZE; padrão 5, teto de 10). É INDEPENDENTE do
 // limite por execução; cada lote é ainda limitado ao saldo de tentativas
@@ -351,8 +380,11 @@ const DEFAULT_DEPENDENCIES: ProcessDependencies = {
  * Analisa até o limite de vagas da execução — ampliado pelo orçamento de
  * requisições da cota do Gemini (orçamento × tamanho do lote), com
  * JOBFINDER_MAX_ANALYSES como piso. Reaproveita análises salvas (inclusive as
- * marcadas como revisão), ignora vagas já notificadas e envia no máximo uma
- * notificação por execução, priorizando as vagas compatíveis.
+ * marcadas como revisão), ignora vagas já notificadas e envia até
+ * JOBFINDER_MAX_NOTIFICATIONS notificações (padrão 3, teto 10), priorizando
+ * TODAS as vagas compatíveis antes das de revisão manual e respeitando a ordem
+ * de prioridade dentro de cada grupo; falhas individuais de envio não impedem
+ * as demais.
  *
  * As vagas novas são enviadas ao Gemini em LOTES por `generateContent` (não a
  * Batch API): até BATCH_SIZE vagas por requisição (JOBFINDER_ANALYSIS_BATCH_SIZE;
@@ -373,6 +405,13 @@ const DEFAULT_DEPENDENCIES: ProcessDependencies = {
  * vaga), novas chamadas ao Gemini são interrompidas pelo restante da execução,
  * mas o laço continua: as análises já salvas seguem sendo reaproveitadas e as
  * vagas pendentes serão reprocessadas numa próxima execução.
+ *
+ * Ao atingir o limite de análises, o laço também NÃO é interrompido: ele segue
+ * percorrendo as vagas para reconsultar o histórico (sem novas chamadas ao
+ * Gemini), permitindo encontrar vagas compatíveis posteriores e candidatas
+ * substitutas caso um envio falhe. O encerramento antecipado só ocorre quando
+ * nenhuma modalidade de notificação está ativa (envio geral e revisões
+ * desativados), quando não há candidatas a coletar.
  *
  * @param jobs Vagas já filtradas e priorizadas.
  * @param deps Dependências do processamento (padrão: implementações reais).
@@ -415,9 +454,13 @@ export async function processJobs(
     );
   };
 
-  // Candidatos pendentes, na ordem de prioridade em que aparecem.
-  let compatibleCandidate: NotificationCandidate | undefined;
-  let reviewCandidate: NotificationCandidate | undefined;
+  // Candidatas a notificação, coletadas na ordem de prioridade em que aparecem
+  // e separadas por tipo: todas as compatíveis têm prioridade sobre as de
+  // revisão manual. Cada vaga aparece no máximo uma vez (a deduplicação por
+  // "source:id" e o descarte de vagas já notificadas impedem repetições),
+  // independentemente de a análise ser nova ou recuperada do histórico.
+  const compatibleCandidates: NotificationCandidate[] = [];
+  const reviewCandidates: NotificationCandidate[] = [];
 
   // Vagas cuja iteração já começou; usado para medir o que sobra no break.
   let processed = 0;
@@ -485,15 +528,14 @@ export async function processJobs(
 
     const kind = classifyNotification(analysis);
 
-    // Compatível tem prioridade; revisão só conta quando habilitada.
+    // Compatíveis têm prioridade; revisão só conta quando habilitada. Cada
+    // candidata é acumulada na ordem de prioridade em que é resolvida, seja
+    // nova ou recuperada do histórico, sem duplicar a mesma vaga.
     if (kind === "compatible") {
       if (!SEND_NOTIFICATIONS) {
         registerSkip(job, "notifications_disabled");
-      } else if (compatibleCandidate) {
-        // Já há uma compatível escolhida nesta execução: limite de envio.
-        registerSkip(job, "run_limit");
       } else {
-        compatibleCandidate = { job, analysis };
+        compatibleCandidates.push({ job, analysis });
       }
     } else if (kind === "manual_review") {
       // Sem o envio geral, o motivo raiz é "notificações desativadas": o envio
@@ -502,10 +544,8 @@ export async function processJobs(
         registerSkip(job, "notifications_disabled");
       } else if (!SEND_REVIEWS) {
         registerSkip(job, "reviews_disabled");
-      } else if (reviewCandidate) {
-        registerSkip(job, "run_limit");
       } else {
-        reviewCandidate = { job, analysis };
+        reviewCandidates.push({ job, analysis });
       }
     } else if (analysis.locationStatus !== "allowed") {
       registerSkip(job, "location");
@@ -624,13 +664,18 @@ export async function processJobs(
   };
 
   for (const job of jobs) {
-    // Limite de chamadas atingido: só continua se ainda houver envio pendente.
-    if (analysesUsed >= jobLimit) {
-      if (!SEND_NOTIFICATIONS || compatibleCandidate) {
-        // As vagas restantes nem chegam a ter o histórico consultado.
-        summary.unscannedByLimit = jobs.length - processed;
-        break;
-      }
+    // Limite de chamadas atingido: o laço NÃO é interrompido apenas por já
+    // haver candidatas suficientes. Ele segue percorrendo as vagas para
+    // reconsultar o histórico (sem novas chamadas ao Gemini), de modo que
+    // vagas compatíveis posteriores e candidatas substitutas (caso um envio
+    // falhe) ainda sejam encontradas — a ordem de prioridade e o limite de
+    // notificações são aplicados depois, na fila final. O encerramento
+    // antecipado só ocorre quando NENHUMA modalidade de notificação está ativa
+    // (envio geral e revisões desativados): aí não há candidatas a coletar e as
+    // vagas restantes deixam de ser percorridas (nem o histórico é consultado).
+    if (analysesUsed >= jobLimit && !SEND_NOTIFICATIONS && !SEND_REVIEWS) {
+      summary.unscannedByLimit = jobs.length - processed;
+      break;
     }
 
     processed++;
@@ -678,27 +723,63 @@ export async function processJobs(
   // Envia o lote final (parcial), se houver.
   await flushBatch();
 
-  // Uma notificação por execução: compatível antes de revisão manual.
-  if (compatibleCandidate) {
-    const { job } = compatibleCandidate;
-    if (await deps.notify(compatibleCandidate, "compatible")) {
+  // Notificações da execução: TODAS as compatíveis antes das de revisão manual,
+  // respeitando a ordem de prioridade dentro de cada grupo. Envia até
+  // MAX_NOTIFICATIONS (JOBFINDER_MAX_NOTIFICATIONS; padrão 3, teto 10) e
+  // contabiliza apenas os envios ACEITOS — vagas já reservadas/notificadas e
+  // falhas individuais não consomem o limite. Uma falha de envio de uma
+  // candidata é isolada e não impede as demais; a reserva já foi tratada pelo
+  // despacho (liberada quando não entregue, mantida pendente quando incerta).
+  const queue: Array<{
+    candidate: NotificationCandidate;
+    kind: NotificationKind;
+  }> = [
+    ...compatibleCandidates.map((candidate) => ({
+      candidate,
+      kind: "compatible" as const,
+    })),
+    ...reviewCandidates.map((candidate) => ({
+      candidate,
+      kind: "manual_review" as const,
+    })),
+  ];
+
+  let sent = 0;
+
+  for (const { candidate, kind } of queue) {
+    const { job } = candidate;
+
+    if (sent >= MAX_NOTIFICATIONS) {
+      registerSkip(job, "run_limit");
+      continue;
+    }
+
+    let delivered: boolean;
+    try {
+      delivered = await deps.notify(candidate, kind);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Falha ao notificar "${job.title}" (${job.company}): ${message}. ` +
+          "Seguindo para as demais notificações elegíveis.",
+      );
+      continue;
+    }
+
+    if (!delivered) {
+      registerSkip(job, "already_notified");
+      continue;
+    }
+
+    sent++;
+    if (kind === "compatible") {
       summary.sentCompatible++;
       console.log(`Notificação enviada: ${job.title} (${job.company})`);
     } else {
-      registerSkip(job, "already_notified");
-    }
-
-    // A revisão não é enviada quando já há uma compatível nesta execução.
-    if (reviewCandidate) {
-      registerSkip(reviewCandidate.job, "run_limit");
-    }
-  } else if (reviewCandidate) {
-    const { job } = reviewCandidate;
-    if (await deps.notify(reviewCandidate, "manual_review")) {
       summary.sentReview++;
-      console.log(`Notificação de revisão enviada: ${job.title} (${job.company})`);
-    } else {
-      registerSkip(job, "already_notified");
+      console.log(
+        `Notificação de revisão enviada: ${job.title} (${job.company})`,
+      );
     }
   }
 
@@ -829,6 +910,7 @@ export async function runPipeline(
   console.log(`Armazenamento: ${getStorageBackend()}`);
   console.log(`Limite de vagas nesta execução: ${jobLimit}`);
   console.log(`Vagas por requisição ao Gemini (lote): ${BATCH_SIZE}`);
+  console.log(`Notificações por execução: ${MAX_NOTIFICATIONS}`);
 
   // Detalhamento dos descartes de cada filtro, com exemplos.
   console.log(`Duplicadas descartadas: ${discardedByDedupe}`);
@@ -874,7 +956,8 @@ export async function runPipeline(
 
 /**
  * Coleta das fontes, filtra, prioriza, analisa as vagas novas e (opcionalmente)
- * notifica no máximo uma vaga por execução.
+ * notifica as vagas elegíveis, respeitando JOBFINDER_MAX_NOTIFICATIONS por
+ * execução (padrão 3, teto 10).
  *
  * Com `--audit-only`, executa a mesma coleta e triagem, grava o relatório de
  * auditoria em `data/audit/` e encerra antes da análise, sem IA, históricos,

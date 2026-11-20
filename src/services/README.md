@@ -72,7 +72,14 @@ Serviços e regras de negócio do pipeline.
 ## Notificação e utilidades
 
 - `notification-policy.ts` — classifica a vaga (`compatible`, `manual_review`).
-- `notification-dispatch.ts` — ciclo reserva → envio → confirmação/liberação.
+- `notification-dispatch.ts` — ciclo reserva → envio → confirmação/liberação. A
+  reserva é **atômica** (`source:id`), impedindo envios duplicados mesmo entre
+  execuções simultâneas; uma falha confirmada libera a reserva, e um resultado
+  incerto a mantém `pending`, sem reenvio automático. O pipeline
+  (`processJobs`) envia até `JOBFINDER_MAX_NOTIFICATIONS` (padrão 3, teto 10)
+  notificações por execução, priorizando TODAS as compatíveis antes das de
+  revisão manual (na ordem de prioridade) e isolando falhas individuais de
+  envio — apenas envios aceitos consomem o limite.
 - `telegram.ts` — envio de mensagens (texto simples).
 - `rate-limit.ts` — detecção de HTTP 429 (`RateLimitError`, `withRateLimitGuard`,
   `collectSearchBatch`) e interrupção parcial preservando vagas.
