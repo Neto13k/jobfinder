@@ -10,8 +10,8 @@
 
 // --- Vocabulário base ------------------------------------------------------
 
-/** Termos que indicam o Brasil no texto normalizado. */
-const BRAZIL_TERMS = "brazil|brasil";
+/** Termos que indicam o Brasil no texto normalizado (país e código ISO "BR"). */
+const BRAZIL_TERMS = "brazil|brasil|br";
 
 /**
  * Regiões amplas que incluem o Brasil ou permanecem em avaliação. Mantidas

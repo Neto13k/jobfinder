@@ -1,5 +1,6 @@
 import type { Job } from "../types/job.js";
 import { fetchBoardWithTimeout } from "./board-http.js";
+import { toStringList, toWorkplaceType } from "./normalize.js";
 
 /** Origem das vagas. */
 const SOURCE = "ashby";
@@ -18,6 +19,8 @@ interface AshbyJob {
   location?: string;
   secondaryLocations?: AshbyLocation[];
   workplaceType?: string;
+  /** Tipo de contratação informado pela Ashby (ex.: "FullTime", "Contract"). */
+  employmentType?: string;
   descriptionPlain?: string;
   descriptionHtml?: string;
   publishedAt?: string;
@@ -79,7 +82,7 @@ function toJob(posting: unknown, boardName: string): Job {
   // URL canônica da vaga, base do identificador estável.
    const url = posting.jobUrl?.trim() || posting.applyUrl?.trim() || "";
 
-  return {
+  const job: Job = {
     id: `${boardName}:${url}`,
     title: posting.title,
     company: boardName,
@@ -90,6 +93,41 @@ function toJob(posting: unknown, boardName: string): Job {
     source: SOURCE,
     publishedAt: posting.publishedAt,
   };
+
+  // Campos estruturados: preservados apenas quando a fonte os fornece.
+  const workplaceType = toWorkplaceType(posting.workplaceType);
+  if (workplaceType !== undefined) {
+    job.workplaceType = workplaceType;
+  }
+
+  const contractTypes = toStringList([posting.employmentType]);
+  if (contractTypes.length > 0) {
+    job.contractTypes = contractTypes;
+  }
+
+  const additionalLocations = collectAdditionalLocations(posting);
+  if (additionalLocations.length > 0) {
+    job.additionalLocations = additionalLocations;
+  }
+
+  return job;
+}
+
+/**
+ * Localidades secundárias informadas pela Ashby, sem repetir a principal.
+ *
+ * A localidade principal já é composta em `location` (com as secundárias
+ * concatenadas); aqui elas são expostas separadamente, de forma estruturada.
+ */
+function collectAdditionalLocations(job: AshbyJob): string[] {
+  const primary = job.location?.trim().toLowerCase() ?? "";
+  const secondary = (job.secondaryLocations ?? []).map(
+    (entry) => entry.location,
+  );
+
+  return toStringList(secondary).filter(
+    (value) => value.toLowerCase() !== primary,
+  );
 }
 
 /** Junta a localização principal e as secundárias, sem inferir elegibilidade. */

@@ -9,9 +9,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { buildPrompt, parseAnalysis, SYSTEM_INSTRUCTION } = await import(
-  "../dist/services/ai-analyzer.js"
-);
+const {
+  buildPrompt,
+  parseAnalysis,
+  SYSTEM_INSTRUCTION,
+  resolveDescriptionBudget,
+  DEFAULT_DESCRIPTION_BUDGET,
+} = await import("../dist/services/ai-analyzer.js");
 const { classifyGeminiError, GeminiAnalysisError } = await import(
   "../dist/services/ai-analyzer.js"
 );
@@ -36,39 +40,53 @@ function job(overrides) {
 
 // --- Regras do prompt ------------------------------------------------------
 
-test("instrução do sistema cobre contratação, localização, senioridade e tecnologias", () => {
-  const rules = SYSTEM_INSTRUCTION.toLowerCase();
+test("instrução do sistema cobre os quatro critérios independentes", () => {
+  // Normaliza quebras de linha/indentação para comparar frases contíguas.
+  const rules = SYSTEM_INSTRUCTION.toLowerCase().replace(/\s+/g, " ");
 
   // Contratação: aceitar CLT/estágio, bloquear PJ, não presumir o tipo.
   assert.ok(rules.includes("clt"));
   assert.ok(rules.includes("estágio"));
   assert.ok(rules.includes("pj"));
   assert.ok(rules.includes("unknown"));
+  // CLT oferecida como alternativa real ao PJ é aceita.
+  assert.ok(rules.includes("alternativa real ao pj"));
 
   // Localização: Maceió/AL, remoto no Brasil, regiões amplas e restrições.
   assert.ok(rules.includes("maceió"));
   assert.ok(rules.includes("latam"));
   assert.ok(rules.includes("worldwide"));
   assert.ok(rules.includes("global"));
-  assert.ok(rules.includes("restrições explícitas de residência"));
+  assert.ok(rules.includes("restrição explícita incompatível"));
 
-  // Senioridade: júnior/estágio/trainee e ausência de senioridade.
+  // Senioridade: entrada (júnior/estágio/trainee) e ausência de informação.
+  assert.ok(rules.includes("júnior"));
   assert.ok(rules.includes("trainee"));
   assert.ok(rules.includes("sem senioridade informada"));
 
-  // Tecnologias obrigatórias e desejáveis.
-  assert.ok(rules.includes("next.js"));
-  assert.ok(rules.includes("sass"));
+  // Tecnologias: aderência à stack, distinguindo obrigatórios, diferenciais
+  // e menções incidentais.
+  assert.ok(rules.includes("javascript"));
+  assert.ok(rules.includes("typescript"));
+  assert.ok(rules.includes("react"));
   assert.ok(rules.includes("node.js"));
+  assert.ok(rules.includes("express"));
   assert.ok(rules.includes("postgresql"));
-  assert.ok(rules.includes("rest"));
-  assert.ok(rules.includes("obrigatórias"));
-  assert.ok(rules.includes("desejáveis"));
+  // Tecnologias complementares do perfil (restauradas na TASK-05).
+  assert.ok(rules.includes("next.js, html, css, sass, rest ou postgresql"));
+  assert.ok(rules.includes("obrigatórios"));
+  assert.ok(rules.includes("diferenciais"));
+  assert.ok(rules.includes("incidentais"));
+  // Funções alheias ao desenvolvimento são bloqueadas.
+  assert.ok(rules.includes("não é de desenvolvimento"));
 
-  // Consistência e proteção contra injeção de prompt.
+  // Combinação dos critérios e proteção contra injeção de prompt.
+  assert.ok(rules.includes("blocked"));
+  assert.ok(rules.includes("allowed"));
   assert.ok(rules.includes("não invente"));
   assert.ok(rules.includes("insuficientes"));
   assert.ok(rules.includes("dado"));
+  assert.ok(rules.includes("ignore"));
 });
 
 test("buildPrompt inclui os dados da vaga e a evidência auxiliar de localização", () => {
@@ -115,51 +133,113 @@ test("buildPrompt trata a descrição como dado delimitado e a trunca", () => {
   assert.ok(prompt.includes("DESCRICAO>>>"));
 });
 
+test("resolveDescriptionBudget usa o padrão e aceita override válido", () => {
+  // Sem a variável de ambiente, mantém o orçamento padrão.
+  assert.equal(resolveDescriptionBudget({}), DEFAULT_DESCRIPTION_BUDGET);
+
+  // Inteiro positivo é aceito como orçamento.
+  assert.equal(
+    resolveDescriptionBudget({ JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET: "1200" }),
+    1200,
+  );
+
+  // Valores inválidos são ignorados (mantêm o padrão).
+  for (const raw of ["0", "-5", "abc", "", "1200abc", "12.5", "1e3", "+30"]) {
+    assert.equal(
+      resolveDescriptionBudget({ JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET: raw }),
+      DEFAULT_DESCRIPTION_BUDGET,
+    );
+  }
+});
+
+test("buildPrompt respeita um orçamento explícito e preserva início e fim", () => {
+  const description = `INICIO ${"x".repeat(500)} FIM`;
+  const prompt = buildPrompt(job({ description }), 120);
+
+  // O início e o fim do anúncio são preservados; o miolo é marcado como omitido.
+  assert.ok(prompt.includes("INICIO"));
+  assert.ok(prompt.includes("FIM"));
+  assert.ok(prompt.includes("trecho omitido"));
+
+  // A descrição efetivamente enviada cabe no orçamento.
+  const sent = prompt.split("<<<DESCRICAO\n")[1].split("\nDESCRICAO>>>")[0];
+  assert.ok(sent.length <= 120);
+  assert.ok(sent.length < description.length);
+});
+
+test("buildPrompt preserva um trecho do meio da descrição", () => {
+  // Requisito no MIOLO do anúncio não deve ser descartado no truncamento.
+  const description = `INICIO ${"x".repeat(400)} MEIO_IMPORTANTE ${"y".repeat(400)} FIM`;
+  const prompt = buildPrompt(job({ description }), 200);
+
+  const sent = prompt.split("<<<DESCRICAO\n")[1].split("\nDESCRICAO>>>")[0];
+  assert.ok(sent.length <= 200);
+  assert.ok(sent.includes("INICIO"));
+  assert.ok(sent.includes("FIM"));
+  assert.ok(sent.includes("MEIO_IMPORTANTE"));
+});
+
 // --- Validação das respostas estruturadas ----------------------------------
 
 const VALID = {
-  decision: "compatible",
   score: 90,
   reason: "ok",
+  seniorityStatus: "allowed",
+  technologiesStatus: "allowed",
   locationStatus: "allowed",
   contractStatus: "allowed",
 };
 
-test("parseAnalysis preserva a decisão quando os critérios são válidos", () => {
-  assert.deepEqual(parseAnalysis({ ...VALID }), { ...VALID });
+test("parseAnalysis deriva a decisão dos quatro critérios", () => {
+  // Quatro critérios permitidos => compatível.
+  assert.equal(parseAnalysis({ ...VALID }).decision, "compatible");
+
+  // A decisão enviada pela IA é ignorada: a decisão é sempre derivada.
   assert.equal(
     parseAnalysis({ ...VALID, decision: "incompatible" }).decision,
-    "incompatible",
+    "compatible",
   );
-  assert.equal(parseAnalysis({ ...VALID, decision: "review" }).decision, "review");
+  assert.equal(parseAnalysis({ ...VALID, decision: "review" }).decision, "compatible");
 });
 
 test("parseAnalysis aplica a regra de negócio de bloqueio e revisão", () => {
-  // Bloqueio em qualquer critério torna a vaga incompatível.
-  assert.equal(
-    parseAnalysis({ ...VALID, locationStatus: "blocked" }).decision,
-    "incompatible",
-  );
-  assert.equal(
-    parseAnalysis({ ...VALID, contractStatus: "blocked" }).decision,
-    "incompatible",
-  );
+  const criteria = [
+    "seniorityStatus",
+    "technologiesStatus",
+    "locationStatus",
+    "contractStatus",
+  ];
 
-  // "compatible" com critério indefinido é rebaixado para "review".
+  // Bloqueio em qualquer critério torna a vaga incompatível, inclusive nas
+  // dimensões de senioridade e tecnologias introduzidas na TASK-05.
+  for (const field of criteria) {
+    assert.equal(parseAnalysis({ ...VALID, [field]: "blocked" }).decision, "incompatible");
+  }
+
+  // "compatible" com qualquer critério indefinido é rebaixado para "review".
+  for (const field of criteria) {
+    assert.equal(parseAnalysis({ ...VALID, [field]: "unknown" }).decision, "review");
+  }
+
+  // O bloqueio tem precedência sobre a indefinição.
   assert.equal(
-    parseAnalysis({ ...VALID, locationStatus: "unknown" }).decision,
-    "review",
-  );
-  assert.equal(
-    parseAnalysis({ ...VALID, contractStatus: "unknown" }).decision,
-    "review",
+    parseAnalysis({
+      ...VALID,
+      seniorityStatus: "unknown",
+      technologiesStatus: "blocked",
+    }).decision,
+    "incompatible",
   );
 });
 
 test("TASK-08: parser e política de notificação são coerentes na matriz", () => {
-  // A IA responde "compatible"; o parser rebaixa para "review" ao encontrar
-  // informação indefinida e a política converte isso em revisão manual.
-  const base = { decision: "compatible", score: 80, reason: "ok" };
+  // Os quatro critérios são permitidos; a política notifica.
+  const base = {
+    score: 80,
+    reason: "ok",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
+  };
 
   assert.equal(
     classifyNotification(
@@ -172,6 +252,7 @@ test("TASK-08: parser e política de notificação são coerentes na matriz", ()
     "compatible",
   );
 
+  // Qualquer critério indefinido (sem bloqueio) exige revisão manual.
   for (const [locationStatus, contractStatus] of [
     ["allowed", "unknown"],
     ["unknown", "allowed"],
@@ -185,41 +266,41 @@ test("TASK-08: parser e política de notificação são coerentes na matriz", ()
     );
   }
 
-  // Decisão "review" com critérios permitidos não é promovida a compatível.
-  assert.equal(
-    classifyNotification(
-      parseAnalysis({
-        decision: "review",
-        score: 80,
-        reason: "requisitos a confirmar",
-        locationStatus: "allowed",
-        contractStatus: "allowed",
-      }),
-    ),
-    "manual_review",
-  );
+  // Indefinição em senioridade ou tecnologias também exige revisão manual,
+  // ainda que localização e contratação estejam permitidas.
+  for (const field of ["seniorityStatus", "technologiesStatus"]) {
+    assert.equal(
+      classifyNotification(
+        parseAnalysis({
+          ...base,
+          [field]: "unknown",
+          locationStatus: "allowed",
+          contractStatus: "allowed",
+        }),
+      ),
+      "manual_review",
+    );
+  }
 
   // Bloqueio em qualquer critério rebaixa para "incompatible" e não notifica.
-  assert.equal(
-    classifyNotification(
-      parseAnalysis({
-        ...base,
-        locationStatus: "blocked",
-        contractStatus: "allowed",
-      }),
-    ),
-    null,
-  );
-  assert.equal(
-    classifyNotification(
-      parseAnalysis({
-        ...base,
-        locationStatus: "allowed",
-        contractStatus: "blocked",
-      }),
-    ),
-    null,
-  );
+  for (const field of [
+    "seniorityStatus",
+    "technologiesStatus",
+    "locationStatus",
+    "contractStatus",
+  ]) {
+    assert.equal(
+      classifyNotification(
+        parseAnalysis({
+          ...base,
+          [field]: "blocked",
+          locationStatus: field === "locationStatus" ? "blocked" : "allowed",
+          contractStatus: field === "contractStatus" ? "blocked" : "allowed",
+        }),
+      ),
+      null,
+    );
+  }
 });
 
 test("parseAnalysis normaliza o score para o intervalo 0..100", () => {
@@ -235,7 +316,14 @@ test("parseAnalysis normaliza a justificativa", () => {
 test("parseAnalysis rejeita respostas estruturalmente inválidas", () => {
   assert.throws(() => parseAnalysis(null), /formato inválido/);
   assert.throws(() => parseAnalysis("texto"), /formato inválido/);
-  assert.throws(() => parseAnalysis({ ...VALID, decision: "talvez" }), /decision/);
+  assert.throws(
+    () => parseAnalysis({ ...VALID, seniorityStatus: "maybe" }),
+    /seniorityStatus/,
+  );
+  assert.throws(
+    () => parseAnalysis({ ...VALID, technologiesStatus: "maybe" }),
+    /technologiesStatus/,
+  );
   assert.throws(
     () => parseAnalysis({ ...VALID, locationStatus: "maybe" }),
     /locationStatus/,
@@ -247,6 +335,11 @@ test("parseAnalysis rejeita respostas estruturalmente inválidas", () => {
   assert.throws(() => parseAnalysis({ ...VALID, score: "90" }), /score/);
   assert.throws(() => parseAnalysis({ ...VALID, score: Number.NaN }), /score/);
   assert.throws(() => parseAnalysis({ ...VALID, reason: "   " }), /reason/);
+
+  // Campo obrigatório ausente também é rejeitado.
+  const missing = { ...VALID };
+  delete missing.seniorityStatus;
+  assert.throws(() => parseAnalysis(missing), /seniorityStatus/);
 });
 
 // --- Classificação das falhas do Gemini ------------------------------------

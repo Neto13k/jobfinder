@@ -62,6 +62,8 @@ function analysis(overrides = {}) {
     decision: "compatible",
     score: 77,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
     ...overrides,
@@ -161,6 +163,8 @@ test("histórico de análise grava, recupera e é idempotente", async () => {
     decision: "compatible",
     score: 77,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
   };
@@ -171,6 +175,8 @@ test("histórico de análise grava, recupera e é idempotente", async () => {
   const saved = await history.getAnalyzedJob(target);
   assert.equal(saved.decision, "compatible");
   assert.equal(saved.score, 77);
+  assert.equal(saved.seniorityStatus, "allowed");
+  assert.equal(saved.technologiesStatus, "allowed");
   assert.equal(await history.isJobAnalyzed(target), true);
 
   await history.markJobAsAnalyzed(target, { ...analysis, score: 5, decision: "incompatible" });
@@ -216,6 +222,10 @@ test("não reutiliza análise legada (sem versão)", async () => {
   const stored = await history.getAnalyzedJob(target);
   assert.ok(stored, "o registro legado deve continuar armazenado");
   assert.equal(stored.criteriaVersion, null);
+  // Inserção sem informar os novos critérios usa o DEFAULT 'unknown',
+  // preservando a compatibilidade com a v2.2.0 em produção.
+  assert.equal(stored.seniorityStatus, "unknown");
+  assert.equal(stored.technologiesStatus, "unknown");
 });
 
 test("não reutiliza análise de versão anterior", async () => {

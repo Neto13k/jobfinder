@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { query } from "../db/postgres.js";
 import { getStorageBackend, withStorageLock } from "./storage.js";
@@ -87,6 +87,193 @@ export function deduplicateJobs(jobs: Job[]): Job[] {
     seen.add(key);
     return true;
   });
+}
+
+/** Referência mínima de um anúncio agrupado, preservada para auditoria. */
+export interface EquivalentJobRef {
+  key: string;
+  id: string;
+  source: string;
+  url: string;
+  location: string;
+}
+
+/** Grupo de anúncios considerados equivalentes (mesma vaga anunciada 2+ vezes). */
+export interface EquivalentGroup {
+  /** Assinatura determinística que reúne os anúncios equivalentes. */
+  signature: string;
+  /** Chave "source:id" do anúncio mantido (representante do grupo). */
+  representativeKey: string;
+  /** Anúncios removidos por equivalência com o representante. */
+  members: EquivalentJobRef[];
+}
+
+/** Resultado do agrupamento conservador por equivalência. */
+export interface EquivalentGrouping {
+  /** Anúncios mantidos (representantes e não agrupáveis). */
+  jobs: Job[];
+  /** Grupos com ao menos um membro removido. */
+  groups: EquivalentGroup[];
+}
+
+// Descrição mínima (caracteres normalizados) para admitir agrupamento. Anúncios
+// com descrição genérica, vazia ou insuficiente NUNCA são agrupados: não há
+// como comprovar equivalência.
+const MIN_EQUIVALENT_DESCRIPTION = 80;
+
+// Número mínimo de termos DISTINTOS na descrição. É a evidência substantiva
+// além do comprimento: um texto longo porém repetitivo ou genérico não comprova
+// que os anúncios são a mesma vaga.
+const MIN_EQUIVALENT_DISTINCT_TOKENS = 10;
+
+/** Normaliza acentos, espaços e letras maiúsculas para comparar conteúdo. */
+function normalizeText(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Conta os termos distintos relevantes (>= 4 caracteres) de um texto.
+ *
+ * Serve como evidência substantiva de conteúdo: descrições repetitivas ou de
+ * preenchimento têm poucos termos distintos e não devem comprovar equivalência.
+ */
+function substantiveDistinctTokens(text: string): number {
+  const tokens = new Set(
+    text
+      .split(/\s+/)
+      .map((token) => token.replace(/[^a-z0-9]/g, ""))
+      .filter((token) => token.length >= 4),
+  );
+
+  return tokens.size;
+}
+
+/**
+ * Calcula a assinatura de equivalência de um anúncio.
+ *
+ * Reúne empresa, título, descrição substantiva, modalidade, localidades e
+ * contratação. Retorna null quando o anúncio NÃO é agrupável (empresa ou título
+ * ausente, descrição insuficiente em comprimento OU em termos distintos), o que
+ * impede agrupar apenas por coincidência de título e empresa. A modalidade
+ * integra a assinatura: diferenças de modalidade NUNCA são agrupadas.
+ */
+function equivalenceSignature(job: Job): string | null {
+  const company = normalizeText(job.company ?? "");
+  const title = normalizeText(job.title ?? "");
+  const description = normalizeText(job.description ?? "");
+
+  if (
+    !company ||
+    !title ||
+    description.length < MIN_EQUIVALENT_DESCRIPTION ||
+    substantiveDistinctTokens(description) < MIN_EQUIVALENT_DISTINCT_TOKENS
+  ) {
+    return null;
+  }
+
+  const modality =
+    job.workplaceType ?? (job.remote === true ? "remote" : "unknown");
+
+  const locations = [job.location ?? "", ...(job.additionalLocations ?? [])]
+    .filter((value): value is string => typeof value === "string")
+    .map(normalizeText)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+
+  const contracts = (job.contractTypes ?? [])
+    .filter((value): value is string => typeof value === "string")
+    .map(normalizeText)
+    .sort()
+    .join("|");
+
+  const payload = [
+    company,
+    title,
+    `remote:${modality}`,
+    `loc:${locations}`,
+    `contract:${contracts}`,
+    description,
+  ].join("\u0000");
+
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+/**
+ * Agrupa anúncios equivalentes de forma conservadora.
+ *
+ * Dois anúncios só são agrupados quando coincidem em empresa, título
+ * normalizado, descrição substantiva, modalidade, localidades e contratação. O
+ * representante de cada grupo é escolhido de forma ESTÁVEL: o anúncio de menor
+ * chave "source:id" (ordenação lexicográfica), independentemente da ordem de
+ * entrada. Assim, o mesmo conjunto de anúncios produz sempre o mesmo
+ * representante e o mesmo conjunto de membros. A identidade persistida
+ * ("source:id") é preservada; os demais são registrados como membros do grupo,
+ * com identificadores, URLs e localidades para auditoria.
+ *
+ * @param jobs Vagas já deduplicadas por identidade ("source:id").
+ * @returns As vagas mantidas e os grupos com membros removidos.
+ */
+export function groupEquivalentJobs(jobs: Job[]): EquivalentGrouping {
+  const buckets = new Map<string, Job[]>();
+  const kept: Job[] = [];
+
+  for (const job of jobs) {
+    const signature = equivalenceSignature(job);
+
+    // Sem assinatura: não agrupável; permanece na ordem de entrada.
+    if (!signature) {
+      kept.push(job);
+      continue;
+    }
+
+    const bucket = buckets.get(signature);
+    if (bucket) {
+      bucket.push(job);
+    } else {
+      buckets.set(signature, [job]);
+    }
+  }
+
+  const groups: EquivalentGroup[] = [];
+
+  // Ordena as chaves para manter a saída determinística.
+  for (const signature of [...buckets.keys()].sort()) {
+    const members = buckets.get(signature) ?? [];
+
+    if (members.length === 1) {
+      kept.push(members[0]);
+      continue;
+    }
+
+    // Representante estável: menor chave "source:id", independente da ordem.
+    const sorted = [...members].sort((a, b) => {
+      const keyA = generateJobKey(a);
+      const keyB = generateJobKey(b);
+      return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+    });
+    const [representative, ...removed] = sorted;
+
+    kept.push(representative);
+    groups.push({
+      signature,
+      representativeKey: generateJobKey(representative),
+      members: removed.map((job) => ({
+        key: generateJobKey(job),
+        id: job.id,
+        source: job.source,
+        url: job.url,
+        location: job.location,
+      })),
+    });
+  }
+
+  return { jobs: kept, groups };
 }
 
 /** Normaliza um item do histórico JSON, aceitando o formato legado (string). */

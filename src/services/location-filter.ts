@@ -27,7 +27,7 @@ const NEGATION_AFTER = /^[^.;!?]{0,15}\b(?:not|nao|indisponivel|unavailable)\b/;
 // Localidades claramente estrangeiras: países, regiões e cidades frequentes nos
 // anúncios. A mera menção na descrição NÃO bloqueia; estes termos só pesam na
 // localização da vaga ou em exigências explícitas de residência.
-const FOREIGN_AREA = [
+const FOREIGN_AREA_TERMS = [
   // América do Norte
   "us", "usa", "united states", "estados unidos", "eua", "canada", "mexico",
   "mexico city", "cidade do mexico", "california", "new york", "nova york",
@@ -48,7 +48,8 @@ const FOREIGN_AREA = [
   "apac", "india", "indonesia", "philippines", "filipinas", "pakistan",
   "bangladesh", "vietnam", "china", "japan", "japao", "singapore",
   "singapura", "australia", "new zealand", "dubai", "uae",
-  "emirados arabes unidos", "israel", "hong kong", "korea", "bangalore",
+  "emirados arabes unidos", "israel", "turkey", "turkiye", "turquia",
+  "istanbul", "ankara", "hong kong", "korea", "bangalore",
   "bengaluru", "hyderabad", "tokyo", "shanghai", "beijing", "sydney",
   "melbourne",
   // África
@@ -60,10 +61,19 @@ const FOREIGN_AREA = [
   "nicaragua", "cuba", "republica dominicana", "puerto rico", "bogota",
   "medellin", "cali", "lima", "santiago", "buenos aires", "montevideu",
   "montevideo",
-].join("|");
+];
+
+const FOREIGN_AREA = FOREIGN_AREA_TERMS.join("|");
 
 // Localidade estrangeira isolada (usada na localização e em exigências).
 const FOREIGN_LOCATION = new RegExp(`\\b(?:${FOREIGN_AREA})\\b`);
+
+// Sinal estrangeiro no TÍTULO. Ignora o código isolado "us", que em títulos
+// costuma surgir em expressões como "join us" e não como país; os demais termos
+// (países, regiões e cidades) são suficientemente específicos.
+const FOREIGN_TITLE = new RegExp(
+  `\\b(?:${FOREIGN_AREA_TERMS.filter((term) => term !== "us").join("|")})\\b`,
+);
 
 // Exclusão explícita de candidatos residentes em outro país (incompatível).
 //
@@ -241,22 +251,30 @@ export function classifyJobModality(input: {
 }
 
 /**
- * Combina o sinal estruturado de remoto (`Job.remote`) com os sinais textuais.
+ * Combina os sinais de modalidade estruturados (`Job.remote` e
+ * `Job.workplaceType`) com os sinais textuais.
  *
- * `Job.remote === true` é um sinal estruturado confiável (providers que expõem
- * a modalidade, como Greenhouse, Lever e Ashby). `Job.remote === false` NÃO
- * confirma presencial: apenas indica "remoto não confirmado". Sinais
+ * `Job.remote === true` e `workplaceType === "remote"` são sinais estruturados
+ * confiáveis (providers que expõem a modalidade). `Job.remote === false` NÃO
+ * confirma presencial: apenas indica "remoto não confirmado". `workplaceType`
+ * "hybrid"/"onsite" é sinal estruturado de presencial/híbrido. Sinais
  * estruturados e textuais contraditórios resultam em "unknown".
  */
 function resolveModality(job: Job): JobModality {
   const { remote: textualRemote, onsite } = detectTextualSignals(job);
-  const remote = textualRemote || job.remote === true;
 
-  if (remote && onsite) {
+  const structuredRemote = job.workplaceType === "remote";
+  const structuredOnsite =
+    job.workplaceType === "hybrid" || job.workplaceType === "onsite";
+
+  const remote = textualRemote || job.remote === true || structuredRemote;
+  const onsiteSignal = onsite || structuredOnsite;
+
+  if (remote && onsiteSignal) {
     return "unknown";
   }
 
-  if (onsite) {
+  if (onsiteSignal) {
     return "onsite";
   }
 
@@ -347,7 +365,8 @@ function evaluateResidenceRestriction(
  *          residentes de outro país ou exclusão explícita do Brasil.
  * unknown: modalidade desconhecida, sinais geográficos contraditórios (ex.:
  *          exigência estrangeira com alternativa no Brasil, localização
- *          estrangeira com elegibilidade explícita ao Brasil na descrição) ou
+ *          estrangeira com elegibilidade explícita ao Brasil na descrição,
+ *          conflito entre o país do título e uma localidade elegível) ou
  *          restrição de residência não classificável.
  *
  * A elegibilidade brasileira é admitida na LOCALIZAÇÃO da vaga, em exigências
@@ -355,13 +374,30 @@ function evaluateResidenceRestriction(
  * candidatos residentes no Brasil. Menções genéricas no anúncio (clientes,
  * escritórios ou empresa global) NÃO comprovam que residentes no Brasil podem
  * se candidatar.
+ *
+ * Além do texto, consideram-se os campos estruturados `workplaceType`
+ * (modalidade) e `additionalLocations` (localidades extras informadas pela
+ * fonte); um sinal estruturado em contradição com o texto resulta em "unknown".
  */
 export function classifyJobLocation(job: Job): JobLocation {
-  const location = normalize(job.location ?? "");
+  // Localidades adicionais informadas pela fonte entram na avaliação geográfica
+  // junto com a localização principal.
+  const additional = (job.additionalLocations ?? [])
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  const location = normalize(`${job.location ?? ""} ${additional}`.trim());
+  const title = normalize(job.title ?? "");
   const description = normalize(job.description ?? "");
   const scope = normalize(
-    `${job.location ?? ""} ${job.title ?? ""} ${job.description ?? ""}`,
+    `${job.location ?? ""} ${additional} ${job.title ?? ""} ${job.description ?? ""}`,
   );
+
+  // Área estrangeira no título (ex.: "Software Engineer - India"). Isolada na
+  // localização o sinal já é tratado no ramo remoto; aqui o título é somado
+  // para que um país estrangeiro não passe despercebido quando a localização é
+  // genérica e para detectar conflito com a localidade.
+  const titleForeignMatch = title.match(FOREIGN_TITLE);
+  const titleForeign = titleForeignMatch !== null;
 
   // Exclusão explícita de candidatos residentes no Brasil: incompatível.
   if (BRAZIL_EXCLUSION.test(scope)) {
@@ -382,11 +418,6 @@ export function classifyJobLocation(job: Job): JobLocation {
 
   const modality = resolveModality(job);
 
-  // Vagas explicitamente em Maceió/AL são aceitas (presencial, híbrida ou remota).
-  if (TARGET_CITY.test(location)) {
-    return "allowed";
-  }
-
   // Localização com país, região ou cidade/estado brasileiro reconhecido.
   // Em "El Salvador"/"San Salvador" (estrangeiros) o termo "Salvador" é
   // removido antes da checagem para não confundir com a cidade brasileira.
@@ -394,6 +425,32 @@ export function classifyJobLocation(job: Job): JobLocation {
     location.replace(FOREIGN_SHADOWING_BRAZIL, " "),
   );
   const locationEligible = ELIGIBLE_REGION.test(location) || brazilPlace;
+
+  // País estrangeiro indicado na LOCALIDADE (principal ou adicional).
+  const locationForeignMatch = location.match(FOREIGN_LOCATION);
+  const locationForeignTerm = locationForeignMatch?.[0] ?? null;
+  const titleForeignTerm = titleForeignMatch?.[0] ?? null;
+
+  // Conflito entre o país do TÍTULO e a localidade (principal ou adicional):
+  // a vaga fica indefinida, SEM presumir elegibilidade brasileira.
+  // - título estrangeiro + localidade elegível (ex.: título "... - India" com
+  //   local adicional "Brazil");
+  // - título estrangeiro + localidade em país estrangeiro DIFERENTE (ex.:
+  //   título "... - India" com local "Remote - Colombia").
+  // A repetição do MESMO país não é conflito. Menções institucionais na
+  // descrição não resolvem o conflito.
+  if (
+    titleForeign &&
+    (locationEligible ||
+      (locationForeignTerm !== null && locationForeignTerm !== titleForeignTerm))
+  ) {
+    return "unknown";
+  }
+
+  // Vagas explicitamente em Maceió/AL são aceitas (presencial, híbrida ou remota).
+  if (TARGET_CITY.test(location)) {
+    return "allowed";
+  }
 
   // Presencial ou híbrido explícito fora de Maceió: bloqueado quando há
   // localização; sem localização identificável permanece indefinido.
@@ -408,12 +465,12 @@ export function classifyJobLocation(job: Job): JobLocation {
       return "allowed";
     }
 
-    // Localização estrangeira explícita. Se a descrição indicar de forma
-    // EXPLÍCITA que aceita candidatos residentes no Brasil, as evidências são
-    // contraditórias e a vaga fica indefinida para a IA; menções genéricas
-    // (clientes, escritórios, empresa global) NÃO liberam e a vaga permanece
-    // bloqueada.
-    if (FOREIGN_LOCATION.test(location)) {
+    // País estrangeiro na localização OU no título (ex.: "Engineer - India"
+    // com localização genérica). Se a descrição indicar de forma EXPLÍCITA que
+    // aceita candidatos residentes no Brasil, as evidências são contraditórias e
+    // a vaga fica indefinida para a IA; menções genéricas (clientes, escritórios,
+    // empresa global) NÃO liberam e a vaga permanece bloqueada.
+    if (FOREIGN_LOCATION.test(location) || titleForeign) {
       return BRAZIL_ELIGIBILITY.test(description) ? "unknown" : "blocked";
     }
 
@@ -448,4 +505,14 @@ export function classifyJobLocation(job: Job): JobLocation {
  */
 export function filterByLocation(jobs: Job[]): Job[] {
   return jobs.filter((job) => classifyJobLocation(job) !== "blocked");
+}
+
+/**
+ * Motivo objetivo do descarte por localização; null quando a vaga não é
+ * descartada por essa etapa.
+ */
+export function locationDiscardReason(job: Job): string | null {
+  return classifyJobLocation(job) === "blocked"
+    ? "localização incompatível (restrição geográfica explícita)"
+    : null;
 }

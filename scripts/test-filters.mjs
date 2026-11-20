@@ -1103,9 +1103,10 @@ test("priorização temporal: vagas recentes passam à frente das antigas", () =
   assert.deepEqual(ids(result), ["recente", "media", "antiga"]);
 });
 
-test("priorização temporal: recência prevalece sobre elegibilidade geográfica", () => {
-  // Localização indefinida (MEDIUM) mas recém-publicada supera uma vaga
-  // elegível (HIGH) muito antiga.
+test("priorização: localização elegível supera vaga indefinida mais recente", () => {
+  // Com os pesos atuais (localização 20 > recência 10), uma vaga elegível
+  // (remoto Brasil) mantém vantagem mesmo sendo mais antiga que uma vaga de
+  // localização indefinida e recém-publicada.
   const result = prioritizeJobs(
     [
       job({
@@ -1122,7 +1123,7 @@ test("priorização temporal: recência prevalece sobre elegibilidade geográfic
     ],
     REFERENCE,
   );
-  assert.deepEqual(ids(result), ["indefinida-recente", "elegivel-antiga"]);
+  assert.deepEqual(ids(result), ["elegivel-antiga", "indefinida-recente"]);
 });
 
 test("priorização temporal: prioridade geográfica é preservada na mesma faixa", () => {

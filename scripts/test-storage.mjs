@@ -151,6 +151,8 @@ test("histórico de análise grava, recupera e é idempotente", async () => {
     decision: "compatible",
     score: 88,
     reason: "CLT remoto Brasil",
+    seniorityStatus: "allowed",
+    technologiesStatus: "allowed",
     locationStatus: "allowed",
     contractStatus: "allowed",
   };
@@ -161,6 +163,8 @@ test("histórico de análise grava, recupera e é idempotente", async () => {
   const saved = await history.getAnalyzedJob(target);
   assert.equal(saved.decision, "compatible");
   assert.equal(saved.score, 88);
+  assert.equal(saved.seniorityStatus, "allowed");
+  assert.equal(saved.technologiesStatus, "allowed");
   assert.equal(await history.isJobAnalyzed(target), true);
 
   // Segunda gravação não sobrescreve o resultado existente.

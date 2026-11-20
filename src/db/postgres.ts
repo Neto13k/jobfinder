@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
-import type { PoolConfig, QueryResult, QueryResultRow } from "pg";
+import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from "pg";
 
 let pool: Pool | undefined;
 
@@ -154,6 +154,50 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
     }
 
     throw error;
+  }
+}
+
+/**
+ * Executa uma tarefa dentro de uma transação, com um cliente dedicado.
+ *
+ * Abre uma transação, entrega o cliente à tarefa, confirma ao final e desfaz em
+ * caso de erro. A transação permite operações atômicas que abrangem várias
+ * instruções (por exemplo, um advisory lock transacional seguido de leitura e
+ * escrita), garantindo consistência entre execuções simultâneas. O cliente é
+ * sempre devolvido ao pool.
+ *
+ * @param task Operação a executar dentro da transação.
+ * @returns O resultado da tarefa.
+ * @throws Error claro em caso de falha na validação do certificado TLS.
+ */
+export async function withTransaction<T>(
+  task: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+
+  try {
+    await client.query("begin");
+    const result = await task(client);
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      // Ignora falha no rollback: preserva o erro original, mais relevante.
+    }
+
+    if (isCertificateError(error)) {
+      throw new Error(
+        "Falha na validação do certificado TLS do PostgreSQL. " +
+          "Se o servidor usar uma CA privada, configure DATABASE_CA_CERT_PATH " +
+          "com o certificado fornecido pelo Supabase.",
+      );
+    }
+
+    throw error;
+  } finally {
+    client.release();
   }
 }
 

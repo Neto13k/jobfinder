@@ -2,7 +2,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { query } from "../db/postgres.js";
-import { ANALYSIS_CRITERIA_VERSION, type JobAnalysis } from "./ai-analyzer.js";
+import {
+  ANALYSIS_CRITERIA_VERSION,
+  type AnalysisStatus,
+  type JobAnalysis,
+} from "./ai-analyzer.js";
 import { generateJobKey } from "./deduplication.js";
 import { getStorageBackend, withStorageLock } from "./storage.js";
 import type { Job } from "../types/job.js";
@@ -28,6 +32,8 @@ export interface AnalyzedJobRecord {
   decision: JobAnalysis["decision"];
   score: number;
   reason: string;
+  seniorityStatus: JobAnalysis["seniorityStatus"];
+  technologiesStatus: JobAnalysis["technologiesStatus"];
   locationStatus: JobAnalysis["locationStatus"];
   contractStatus: JobAnalysis["contractStatus"];
   analyzedAt: string;
@@ -42,16 +48,60 @@ interface AnalyzedJobRow {
   decision: string;
   score: number;
   reason: string;
+  seniority_status: string;
+  technologies_status: string;
   location_status: string;
   contract_status: string;
   analyzed_at: Date | string;
   criteria_version: string | null;
 }
 
-/** Verifica se o valor tem o formato de um registro de análise. */
-function isAnalyzedJobRecord(value: unknown): value is AnalyzedJobRecord {
+/** Verifica se o valor é um status de critério válido. */
+function isStatus(value: unknown): value is AnalysisStatus {
+  return typeof value === "string" && STATUSES.includes(value as AnalysisStatus);
+}
+
+/**
+ * Refina um valor desconhecido para um status válido (`AnalysisStatus`).
+ *
+ * Ausente (`undefined`), devolve o `fallback` informado — usado pelos registros
+ * legados, anteriores aos quatro critérios. Presente porém fora do domínio,
+ * devolve `undefined`. Não usa `any` nem conversões de tipo, preservando a
+ * validação rigorosa do histórico.
+ *
+ * @param value Valor bruto lido do registro.
+ * @param fallback Status padrão quando o valor está ausente.
+ * @returns O status validado ou `undefined` quando inválido.
+ */
+function toStatus(
+  value: unknown,
+  fallback?: AnalysisStatus,
+): AnalysisStatus | undefined {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  return isStatus(value) ? value : undefined;
+}
+
+/**
+ * Normaliza um registro persistido no histórico JSON.
+ *
+ * Registros legados (anteriores aos quatro critérios) não possuem
+ * `seniorityStatus` nem `technologiesStatus`; quando ausentes, são
+ * normalizados como `"unknown"` — classificação conservadora que exige
+ * revisão — preservando a `decision` e a `criteriaVersion` originais. Valores
+ * presentes porém inválidos continuam sendo rejeitados, para não enfraquecer a
+ * validação do histórico.
+ *
+ * @param value Registro bruto lido do histórico.
+ * @returns O registro normalizado ou `undefined` quando o formato é inválido.
+ */
+function normalizeAnalyzedJobRecord(
+  value: unknown,
+): AnalyzedJobRecord | undefined {
   if (typeof value !== "object" || value === null) {
-    return false;
+    return undefined;
   }
 
   const record = value as Record<string, unknown>;
@@ -64,7 +114,7 @@ function isAnalyzedJobRecord(value: unknown): value is AnalyzedJobRecord {
     version === null ||
     (typeof version === "string" && version.trim() !== "");
 
-  return (
+  const valid =
     typeof record.key === "string" &&
     record.key.trim() !== "" &&
     typeof record.reason === "string" &&
@@ -76,10 +126,40 @@ function isAnalyzedJobRecord(value: unknown): value is AnalyzedJobRecord {
     typeof record.analyzedAt === "string" &&
     !Number.isNaN(Date.parse(record.analyzedAt)) &&
     DECISIONS.includes(record.decision as JobAnalysis["decision"]) &&
-    STATUSES.includes(record.locationStatus as JobAnalysis["locationStatus"]) &&
-    STATUSES.includes(record.contractStatus as JobAnalysis["contractStatus"]) &&
-    versionValid
-  );
+    versionValid;
+
+  if (!valid) {
+    return undefined;
+  }
+
+  // Critérios validados por type guard, refinando de `unknown` para
+  // `AnalysisStatus`. Ausentes (registros legados) viram "unknown".
+  const seniorityStatus = toStatus(record.seniorityStatus, "unknown");
+  const technologiesStatus = toStatus(record.technologiesStatus, "unknown");
+  const locationStatus = toStatus(record.locationStatus);
+  const contractStatus = toStatus(record.contractStatus);
+
+  if (
+    seniorityStatus === undefined ||
+    technologiesStatus === undefined ||
+    locationStatus === undefined ||
+    contractStatus === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    key: record.key as string,
+    decision: record.decision as JobAnalysis["decision"],
+    score,
+    reason: record.reason as string,
+    seniorityStatus,
+    technologiesStatus,
+    locationStatus,
+    contractStatus,
+    analyzedAt: record.analyzedAt as string,
+    criteriaVersion: version as string | null,
+  };
 }
 
 // Lê o histórico JSON; somente arquivo inexistente conta como lista vazia.
@@ -114,13 +194,25 @@ async function readJsonHistory(): Promise<AnalyzedJobRecord[]> {
     );
   }
 
-  if (!Array.isArray(data) || !data.every(isAnalyzedJobRecord)) {
+  if (!Array.isArray(data)) {
     throw new Error(
       `Histórico de análises corrompido (formato inesperado): ${file}`,
     );
   }
 
-  return data;
+  const records: AnalyzedJobRecord[] = [];
+  for (const item of data) {
+    const record = normalizeAnalyzedJobRecord(item);
+    if (!record) {
+      throw new Error(
+        `Histórico de análises corrompido (formato inesperado): ${file}`,
+      );
+    }
+
+    records.push(record);
+  }
+
+  return records;
 }
 
 // Grava o histórico JSON, criando a pasta quando necessário.
@@ -137,6 +229,9 @@ function rowToRecord(row: AnalyzedJobRow): AnalyzedJobRecord {
     decision: row.decision as JobAnalysis["decision"],
     score: Number(row.score),
     reason: row.reason,
+    seniorityStatus: row.seniority_status as JobAnalysis["seniorityStatus"],
+    technologiesStatus:
+      row.technologies_status as JobAnalysis["technologiesStatus"],
     locationStatus: row.location_status as JobAnalysis["locationStatus"],
     contractStatus: row.contract_status as JobAnalysis["contractStatus"],
     analyzedAt: new Date(row.analyzed_at).toISOString(),
@@ -184,6 +279,7 @@ export async function getAnalyzedJob(
   if (getStorageBackend() === "postgres") {
     const { rows } = await query<AnalyzedJobRow>(
       `select key, decision, score, reason,
+              seniority_status, technologies_status,
               location_status, contract_status, analyzed_at, criteria_version
          from public.analyzed_jobs
         where key = $1
@@ -224,6 +320,7 @@ export async function getReusableAnalysis(
   if (getStorageBackend() === "postgres") {
     const { rows } = await query<AnalyzedJobRow>(
       `select key, decision, score, reason,
+              seniority_status, technologies_status,
               location_status, contract_status, analyzed_at, criteria_version
          from public.analyzed_jobs
         where key = $1 and criteria_version = $2
@@ -266,15 +363,17 @@ export async function markJobAsAnalyzed(
     // preserva qualquer resultado já gravado para o mesmo par (idempotente).
     await query(
       `insert into public.analyzed_jobs
-         (key, decision, score, reason, location_status, contract_status,
-          criteria_version)
-       values ($1, $2, $3, $4, $5, $6, $7)
+         (key, decision, score, reason, seniority_status, technologies_status,
+          location_status, contract_status, criteria_version)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        on conflict (key, criteria_version) do nothing`,
       [
         key,
         analysis.decision,
         analysis.score,
         analysis.reason,
+        analysis.seniorityStatus,
+        analysis.technologiesStatus,
         analysis.locationStatus,
         analysis.contractStatus,
         ANALYSIS_CRITERIA_VERSION,
@@ -303,6 +402,8 @@ export async function markJobAsAnalyzed(
       decision: analysis.decision,
       score: analysis.score,
       reason: analysis.reason,
+      seniorityStatus: analysis.seniorityStatus,
+      technologiesStatus: analysis.technologiesStatus,
       locationStatus: analysis.locationStatus,
       contractStatus: analysis.contractStatus,
       analyzedAt: new Date().toISOString(),
