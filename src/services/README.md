@@ -8,8 +8,9 @@ Serviços e regras de negócio do pipeline.
 - `seniority-filter.ts` — exclui senioridade alta por palavra inteira.
 - `location-filter.ts` — remove apenas vagas claramente incompatíveis; mantém
   localização ambígua/ausente para a IA.
-- `job-priority.ts` — priorização (categoria temporal → prioridade geográfica →
-  recência → ordem estável), sem descartar vagas.
+- `job-priority.ts` — pontuação determinística (0–100) por stack, senioridade,
+  localização, recência e contratação; ordena por pontuação decrescente sem
+  descartar vagas.
 
 ## Análise e histórico
 

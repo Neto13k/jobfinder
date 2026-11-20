@@ -233,6 +233,15 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   assert.equal(ok1.contractClassification, "unknown");
   assert.equal(ok1.equivalentGroup, null);
   assert.equal(ok1.queuePosition, 1);
+  // Pontuação total e por critério registradas para vagas aprovadas.
+  assert.equal(ok1.priorityScore, 63);
+  assert.deepEqual(ok1.priorityBreakdown, {
+    stack: 0,
+    seniority: 30,
+    location: 20,
+    recency: 10,
+    contract: 3,
+  });
   assert.equal(ok1.description, "Remoto.");
   assert.equal(ok1.url, "https://epsilon.example.com/jobs/ok1");
   // Data conhecida é preservada integralmente.
@@ -252,6 +261,8 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
       "key",
       "location",
       "locationClassification",
+      "priorityBreakdown",
+      "priorityScore",
       "publishedAt",
       "queuePosition",
       "remote",
@@ -280,6 +291,9 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   assert.equal(ok2.discardStage, null);
   assert.equal(ok2.locationClassification, "allowed");
   assert.equal(ok2.queuePosition, 3);
+  // Sem stack, senioridade júnior/pleno nem data: pontuação neutra mais baixa.
+  assert.equal(ok2.priorityScore, 36);
+  assert.equal(ok2.priorityBreakdown.recency, 5);
   // Data ausente é representada como null, e a chave permanece presente.
   assert.equal(ok2.publishedAt, null);
 
@@ -289,6 +303,9 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
   assert.match(mkt.discardReason, /marketing/);
   assert.equal(mkt.locationClassification, null);
   assert.equal(mkt.queuePosition, null);
+  // Vaga descartada: sem pontuação de priorização.
+  assert.equal(mkt.priorityScore, null);
+  assert.equal(mkt.priorityBreakdown, null);
 
   const senior = byKey.get("ashby:senior");
   assert.equal(senior.discardStage, "seniority");

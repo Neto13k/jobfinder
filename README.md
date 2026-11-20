@@ -53,7 +53,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 b
 - Coleta de vagas no **LinkedIn Jobs** e no **Indeed Jobs**, por termo de busca (júnior e estágio), com rotação de lotes por hora UTC.
 - Normalização de vagas para um modelo comum e deduplicação por origem e identificador (`source:id`).
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
-- Priorização geográfica das vagas, sem excluir oportunidades apenas por terem prioridade baixa.
+- Priorização determinística (0–100) das vagas por stack, senioridade, localização, recência e contratação; ordena da maior para a menor pontuação, sem excluir oportunidades.
 - Análise de vagas com **limite operacional de cinco análises por execução** (`JOBFINDER_MAX_ANALYSES`, padrão `1`, teto `5`), por meio do Gemini, reaproveitando análises salvas.
 - Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
@@ -175,7 +175,7 @@ A ordem do funil é: **deduplicação → cargo → senioridade → localizaçã
 - **Senioridade:** remove títulos com senioridade alta por **palavra inteira** (`sênior`, `pleno`, `lead`, `staff`, `principal`, `especialista`/`specialist`, `mid-level`), preservando júnior, estágio, trainee e vagas sem senioridade informada.
 - **Localização:** remove apenas vagas **claramente incompatíveis** (presencial/híbrido fora de Maceió/AL, restrição explícita a residentes de outro país ou exclusão explícita do Brasil). Para vagas **remotas sem restrição geográfica explícita**, a triagem presume **elegibilidade operacional** (`allowed`) — uma presunção de triagem, **não** uma confirmação de disponibilidade no Brasil. Os bloqueios explícitos são preservados: localização estrangeira, restrição de residência a outro país e exclusão explícita do Brasil permanecem `blocked`; sinais contraditórios (localização estrangeira com descrição que declara aceitar residentes no Brasil) permanecem `unknown`. `remote: true` **não** significa disponibilidade no Brasil e `remote: false` **não** confirma presencial — a modalidade é inferida do próprio anúncio, considerando negações e contradições. Vagas **indefinidas** são preservadas para a IA avaliar.
 - **Padrões geográficos centralizados:** as expressões regulares geográficas compartilhadas por `location-filter.ts` e `job-priority.ts` ficam reunidas em `src/config/geo-patterns.ts`, evitando divergência entre triagem e priorização.
-- **Priorização (temporal + geográfica):** ordena sem descartar. 1) **categoria temporal** (≤24h, ≤72h, ≤7d, ≤14d, >14d e, por último, data desconhecida/inválida); 2) **prioridade geográfica** (`HIGH` Maceió ou remoto no Brasil; `MEDIUM` remoto LATAM/global ou localização ambígua; `LOW` restrições/exclusão do Brasil); 3) data de publicação mais recente; 4) ordem original (ordenação estável). Datas ausentes, inválidas ou futuras são tratadas como recência desconhecida.
+- **Priorização (pontuação 0–100):** ordena sem descartar, somando cinco critérios: **stack (35)** — JavaScript, TypeScript, React, Node.js, Express e PostgreSQL, distinguindo requisito obrigatório, diferencial e menção incidental; **senioridade (30)** — prioriza júnior e estágio; **localização (20)** — prioriza remoto no Brasil e, em seguida, presencial/híbrido em Maceió/AL; **recência (10)** — favorece publicações recentes sem excluir vagas sem data; **contratação (5)** — favorece CLT e estágio confirmados. Informações desconhecidas recebem pontuação neutra e **nunca** causam exclusão. Desempate por publicação mais recente e, por fim, ordem original (ordenação estável). Datas ausentes, inválidas ou futuras recebem pontuação neutra de recência.
 
 > Os filtros e a IA são mecanismos de **triagem**, não garantias de elegibilidade. A classificação geográfica dos filtros (`allowed`) para vagas remotas sem restrição é uma **presunção operacional de elegibilidade**, distinta da **elegibilidade confirmada pelo Gemini**: a análise de IA em `src/services/ai-analyzer.ts` continua validando a vaga (aceita júnior/estágio/trainee, remoto para residentes no Brasil, presencial/híbrido apenas em Maceió/AL e contratação CLT ou estágio) e pode descartá-la; informação ausente retorna `unknown` e **nunca** é presumida.
 
@@ -519,7 +519,7 @@ jobfinder/
 │   │   ├── job-filter.ts
 │   │   ├── seniority-filter.ts
 │   │   ├── location-filter.ts
-│   │   ├── job-priority.ts            # Priorização temporal e geográfica
+│   │   ├── job-priority.ts            # Pontuação/priorização determinística (0–100)
 │   │   ├── linkedin-search-rotation.ts # Rotação dos 22 lotes do LinkedIn
 │   │   ├── indeed-search-rotation.ts   # Rotação dos 22 lotes do Indeed
 │   │   ├── notification-policy.ts

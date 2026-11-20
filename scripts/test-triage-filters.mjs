@@ -24,6 +24,9 @@ const { filterByContract, classifyJobContract, contractDiscardReason } =
 const { deduplicateJobs, groupEquivalentJobs, generateJobKey } = await import(
   "../dist/services/deduplication.js"
 );
+const { scoreJob, prioritizeJobs } = await import(
+  "../dist/services/job-priority.js"
+);
 
 /** Monta uma vaga mínima com os campos sobrepostos. */
 function job(overrides) {
@@ -1015,4 +1018,455 @@ test("desenvolvimento: programa multidisciplinar exige trilha tecnológica real"
   );
 });
 
+// --- 7. Pontuação e priorização (TASK-04) ----------------------------------
 
+// Instante de referência fixo para tornar a pontuação determinística.
+const SCORE_REFERENCE = new Date("2026-11-19T12:00:00.000Z");
+
+/** ISO de N horas antes da referência de pontuação. */
+function scoreHoursBefore(hours) {
+  return new Date(
+    SCORE_REFERENCE.getTime() - hours * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+test("pontuação: requisito obrigatório supera diferencial e menção incidental", () => {
+  const allStack =
+    "JavaScript, TypeScript, React, Node.js, Express e PostgreSQL.";
+
+  // O ponto interno de "Node.js" não quebra a oração: todas as tecnologias
+  // herdam o cue de requisito da mesma frase.
+  const mandatory = job({
+    title: "Desenvolvedor Full Stack",
+    description: `Requisitos obrigatórios: ${allStack}`,
+  });
+  const differential = job({
+    title: "Desenvolvedor Full Stack",
+    description: `Diferencial: ${allStack}`,
+  });
+  const incidental = job({
+    title: "Desenvolvedor Full Stack",
+    description: `Nossa stack inclui ${allStack}`,
+  });
+
+  const mandatoryScore = scoreJob(mandatory, SCORE_REFERENCE).stack;
+  const differentialScore = scoreJob(differential, SCORE_REFERENCE).stack;
+  const incidentalScore = scoreJob(incidental, SCORE_REFERENCE).stack;
+
+  // Stack completa como requisito: pontuação máxima (35).
+  assert.equal(mandatoryScore, 35);
+  // Metade do peso por tecnologia (0,5 × 35 arredondado).
+  assert.equal(differentialScore, 18);
+  // Menção incidental: fração mínima do peso (0,2 × 35 arredondado).
+  assert.equal(incidentalScore, 7);
+  assert.ok(mandatoryScore > differentialScore);
+  assert.ok(differentialScore > incidentalScore);
+});
+
+test("pontuação: tecnologia no título vale como requisito obrigatório", () => {
+  const score = scoreJob(
+    job({ title: "Desenvolvedor React", description: "" }),
+    SCORE_REFERENCE,
+  ).stack;
+  // Uma de seis tecnologias, como requisito: (1 / 6) × 35 arredondado = 6.
+  assert.equal(score, 6);
+});
+
+test("pontuação: senioridade prioriza júnior e estágio", () => {
+  assert.equal(
+    scoreJob(job({ title: "Desenvolvedor Júnior" }), SCORE_REFERENCE).seniority,
+    30,
+  );
+  assert.equal(
+    scoreJob(job({ title: "Estágio em Desenvolvimento" }), SCORE_REFERENCE)
+      .seniority,
+    30,
+  );
+  // Pleno fica abaixo do alvo, mas acima do desconhecido.
+  assert.equal(
+    scoreJob(job({ title: "Desenvolvedor Pleno" }), SCORE_REFERENCE).seniority,
+    15,
+  );
+  // Senioridade desconhecida recebe valor neutro e não zera o critério.
+  assert.equal(
+    scoreJob(job({ title: "Desenvolvedor Full Stack" }), SCORE_REFERENCE)
+      .seniority,
+    18,
+  );
+});
+
+test("pontuação: localização prioriza remoto Brasil e depois Maceió", () => {
+  assert.equal(
+    scoreJob(job({ location: "Remoto - Brasil", remote: true }), SCORE_REFERENCE)
+      .location,
+    20,
+  );
+  assert.equal(
+    scoreJob(job({ location: "Maceió - AL", remote: false }), SCORE_REFERENCE)
+      .location,
+    16,
+  );
+  // Localização ausente: valor neutro, nunca exclusão.
+  assert.equal(
+    scoreJob(job({ location: "", remote: false }), SCORE_REFERENCE).location,
+    8,
+  );
+});
+
+test("pontuação: localização reutiliza classifyJobLocation (blocked zera; unknown ≤ 8)", () => {
+  // Restrição explícita a região estrangeira: bloqueada, sem pontuação geográfica.
+  const blocked = job({ location: "US residents only", remote: false });
+  assert.equal(classifyJobLocation(blocked), "blocked");
+  assert.equal(scoreJob(blocked, SCORE_REFERENCE).location, 0);
+
+  // Exclusão explícita do Brasil também zera a pontuação geográfica.
+  const excluded = job({
+    location: "Remote",
+    remote: true,
+    description: "Not available in Brazil.",
+  });
+  assert.equal(classifyJobLocation(excluded), "blocked");
+  assert.equal(scoreJob(excluded, SCORE_REFERENCE).location, 0);
+
+  // Geografia indefinida (conflito entre país do título e localidade elegível):
+  // no máximo 8 pontos. A exclusão fica a cargo do filtro, não da pontuação.
+  const ambiguous = job({
+    title: "Desenvolvedor - India",
+    location: "Remoto - Brasil",
+    remote: true,
+  });
+  assert.equal(classifyJobLocation(ambiguous), "unknown");
+  assert.ok(scoreJob(ambiguous, SCORE_REFERENCE).location <= 8);
+});
+
+test("pontuação: reconhece o código BR como Brasil", () => {
+  const brJob = job({ location: "Remote - BR", remote: true });
+  assert.equal(classifyJobLocation(brJob), "allowed");
+  // Remoto no Brasil: pontuação geográfica máxima.
+  assert.equal(scoreJob(brJob, SCORE_REFERENCE).location, 20);
+});
+
+test("pontuação: workplaceType estruturado conta como modalidade remota", () => {
+  // Sem qualquer sinal: localização indefinida (8).
+  assert.equal(
+    scoreJob(job({ location: "", remote: false }), SCORE_REFERENCE).location,
+    8,
+  );
+
+  // workplaceType remoto confirma a modalidade: remoto genérico (10).
+  const structured = job({
+    location: "",
+    remote: false,
+    workplaceType: "remote",
+  });
+  assert.equal(classifyJobLocation(structured), "allowed");
+  assert.equal(scoreJob(structured, SCORE_REFERENCE).location, 10);
+});
+
+test("pontuação: tecnologia expressamente negada ou dispensada não pontua", () => {
+  // Requisito positivo: a tecnologia pontua como obrigatória.
+  assert.equal(
+    scoreJob(
+      job({ title: "Desenvolvedor", description: "Requisitos: TypeScript." }),
+      SCORE_REFERENCE,
+    ).stack,
+    6,
+  );
+  // Mesma tecnologia negada: não pontua.
+  assert.equal(
+    scoreJob(
+      job({
+        title: "Desenvolvedor",
+        description: "Não é necessário TypeScript.",
+      }),
+      SCORE_REFERENCE,
+    ).stack,
+    0,
+  );
+  // Dispensa explícita em inglês: "no experience with React required".
+  assert.equal(
+    scoreJob(
+      job({
+        title: "Desenvolvedor",
+        description: "No experience with React required.",
+      }),
+      SCORE_REFERENCE,
+    ).stack,
+    0,
+  );
+});
+
+test("pontuação: listas HTML preservam o contexto de requisitos e diferenciais", () => {
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description:
+        "<ul>" +
+        "<li>Requisitos: JavaScript e React</li>" +
+        "<li>Diferenciais: Node.js e PostgreSQL</li>" +
+        "</ul>",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  // JavaScript e React como requisitos (1 + 1) e Node.js e PostgreSQL como
+  // diferenciais (0,5 + 0,5): 3,0 de 6 → (3 / 6) × 35 = 17,5 → 18.
+  // Sem a segmentação por item, a cue de diferencial contaminaria toda a lista.
+  assert.equal(score, 18);
+});
+
+test("pontuação: cabeçalho de seção define o contexto dos itens seguintes (HTML)", () => {
+  // Cabeçalhos em itens próprios: os itens seguintes herdam o contexto da seção
+  // até que outra seção comece. JavaScript/React = requisito (1 + 1);
+  // PostgreSQL = diferencial (0,5) → 2,5 de 6 → (2,5 / 6) × 35 → 15.
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description:
+        "<ul>" +
+        "<li>Requisitos:</li>" +
+        "<li>JavaScript</li>" +
+        "<li>React</li>" +
+        "<li>Diferenciais:</li>" +
+        "<li>PostgreSQL</li>" +
+        "</ul>",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  assert.equal(score, 15);
+});
+
+test("pontuação: cabeçalho de seção define o contexto dos itens seguintes (HTML escapado)", () => {
+  // Mesma lista, com as tags escapadas como entidades HTML.
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description:
+        "&lt;ul&gt;" +
+        "&lt;li&gt;Requisitos:&lt;/li&gt;" +
+        "&lt;li&gt;JavaScript&lt;/li&gt;" +
+        "&lt;li&gt;React&lt;/li&gt;" +
+        "&lt;li&gt;Diferenciais:&lt;/li&gt;" +
+        "&lt;li&gt;PostgreSQL&lt;/li&gt;" +
+        "&lt;/ul&gt;",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  assert.equal(score, 15);
+});
+
+test("pontuação: cabeçalho de seção define o contexto dos itens seguintes (texto simples)", () => {
+  // Mesma lista em texto simples, com quebras de linha como delimitadores.
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description:
+        "Requisitos:\nJavaScript\nReact\nDiferenciais:\nPostgreSQL",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  assert.equal(score, 15);
+});
+
+test("pontuação: contexto do cabeçalho encerra ao iniciar outra seção", () => {
+  // React aparece após o cabeçalho de diferenciais: herda diferencial (0,5), e
+  // não o requisito (1) da seção anterior. JavaScript = 1 → 1,5 de 6 → 9.
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description:
+        "<ul>" +
+        "<li>Requisitos:</li>" +
+        "<li>JavaScript</li>" +
+        "<li>Diferenciais:</li>" +
+        "<li>React</li>" +
+        "</ul>",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  assert.equal(score, 9);
+});
+
+test("pontuação: sem cabeçalho, itens isolados permanecem incidentais", () => {
+  // Sem cabeçalho de seção, cada item não carrega cue de requisito nem de
+  // diferencial: JavaScript e React ficam incidentais (0,2 + 0,2) → 2.
+  const score = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description: "<ul><li>JavaScript</li><li>React</li></ul>",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+
+  assert.equal(score, 2);
+});
+
+test("pontuação: cabeçalho institucional ou de benefícios encerra o contexto herdado", () => {
+  // React listado como requisito: JavaScript e React obrigatórios (1 + 1) → 12.
+  const asRequirement = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description: "Requisitos:\nJavaScript\nReact",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+  assert.equal(asRequirement, 12);
+
+  // "Benefícios:" encerra a seção de requisitos: React passa a incidental (0,2),
+  // e não requisito. JavaScript segue obrigatório (1) → 1,2 de 6 → 7.
+  const benefits = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description: "Requisitos:\nJavaScript\nBenefícios:\nReact",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+  assert.equal(benefits, 7);
+
+  // "Sobre a empresa:" também é um cabeçalho não relacionado a requisitos e
+  // encerra o contexto: React fica incidental → 7.
+  const about = scoreJob(
+    job({
+      title: "Desenvolvedor Full Stack",
+      description: "Requisitos:\nNode.js\nSobre a empresa:\nReact",
+    }),
+    SCORE_REFERENCE,
+  ).stack;
+  assert.equal(about, 7);
+});
+
+test("pontuação: recência favorece recentes sem excluir vagas sem data", () => {
+  assert.equal(
+    scoreJob(job({ publishedAt: scoreHoursBefore(1) }), SCORE_REFERENCE).recency,
+    10,
+  );
+  assert.equal(
+    scoreJob(job({ publishedAt: scoreHoursBefore(48) }), SCORE_REFERENCE)
+      .recency,
+    8,
+  );
+  assert.equal(
+    scoreJob(job({ publishedAt: scoreHoursBefore(24 * 30) }), SCORE_REFERENCE)
+      .recency,
+    2,
+  );
+  // Sem data: valor neutro; a vaga permanece avaliável.
+  assert.equal(
+    scoreJob(job({ publishedAt: undefined }), SCORE_REFERENCE).recency,
+    5,
+  );
+});
+
+test("pontuação: contratação favorece CLT e estágio confirmados", () => {
+  assert.equal(
+    scoreJob(
+      job({ title: "Desenvolvedor Júnior", contractTypes: ["CLT"] }),
+      SCORE_REFERENCE,
+    ).contract,
+    5,
+  );
+  // Estágio confirmado no título também é vínculo compatível.
+  assert.equal(
+    scoreJob(job({ title: "Estágio em Desenvolvimento" }), SCORE_REFERENCE)
+      .contract,
+    5,
+  );
+  // Contratação não informada: valor neutro.
+  assert.equal(
+    scoreJob(job({ title: "Desenvolvedor Full Stack" }), SCORE_REFERENCE)
+      .contract,
+    3,
+  );
+  // PJ exclusivo: pior pontuação (a exclusão é decidida pelo filtro).
+  assert.equal(
+    scoreJob(job({ title: "Desenvolvedor PJ" }), SCORE_REFERENCE).contract,
+    0,
+  );
+});
+
+test("pontuação: total soma os critérios e ordena por pontuação decrescente", () => {
+  const top = job({
+    id: "top",
+    title: "Desenvolvedor Júnior",
+    location: "Remoto - Brasil",
+    remote: true,
+    contractTypes: ["CLT"],
+    description:
+      "Requisitos obrigatórios: JavaScript, TypeScript, React, Node.js, Express e PostgreSQL.",
+    publishedAt: scoreHoursBefore(1),
+  });
+  const low = job({
+    id: "low",
+    title: "Desenvolvedor Full Stack",
+    location: "",
+    remote: false,
+  });
+
+  assert.deepEqual(scoreJob(top, SCORE_REFERENCE), {
+    total: 100,
+    stack: 35,
+    seniority: 30,
+    location: 20,
+    recency: 10,
+    contract: 5,
+  });
+
+  assert.deepEqual(scoreJob(low, SCORE_REFERENCE), {
+    total: 34,
+    stack: 0,
+    seniority: 18,
+    location: 8,
+    recency: 5,
+    contract: 3,
+  });
+
+  const ordered = prioritizeJobs([low, top], SCORE_REFERENCE);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    ["top", "low"],
+  );
+  // Nenhuma vaga é clonada ou removida: mesmas referências, reordenadas.
+  assert.equal(ordered.length, 2);
+  assert.equal(ordered[1], low);
+});
+
+test("pontuação: desempate determinístico por recência", () => {
+  // Mesma pontuação total, mas datas distintas: a publicação mais recente vence.
+  const older = job({
+    id: "older",
+    title: "Desenvolvedor Júnior",
+    contractTypes: ["CLT"], // recência 8 (≤72h) + contrato 5 = 13
+    publishedAt: scoreHoursBefore(72),
+  });
+  const newer = job({
+    id: "newer",
+    title: "Desenvolvedor Júnior",
+    // recência 10 (≤24h) + contrato 3 (indefinido) = 13
+    publishedAt: scoreHoursBefore(24),
+  });
+
+  assert.equal(
+    scoreJob(older, SCORE_REFERENCE).total,
+    scoreJob(newer, SCORE_REFERENCE).total,
+  );
+
+  const ordered = prioritizeJobs([older, newer], SCORE_REFERENCE);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    ["newer", "older"],
+  );
+});
+
+test("pontuação: empate total mantém a ordem de entrada (estável)", () => {
+  const a = job({ id: "a", title: "Desenvolvedor Júnior" });
+  const b = job({ id: "b", title: "Desenvolvedor Júnior" });
+  const ordered = prioritizeJobs([a, b], SCORE_REFERENCE);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    ["a", "b"],
+  );
+});

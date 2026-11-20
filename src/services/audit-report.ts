@@ -13,7 +13,11 @@ import {
   type JobContract,
 } from "./contract-filter.js";
 import { developerDiscardReason, filterDeveloperJobs } from "./job-filter.js";
-import { prioritizeJobs } from "./job-priority.js";
+import {
+  prioritizeJobs,
+  scoreJob,
+  type JobPriorityScore,
+} from "./job-priority.js";
 import {
   classifyJobLocation,
   filterByLocation,
@@ -67,6 +71,16 @@ export interface AuditJobEntry {
   equivalentGroup: string | null;
   /** Posição (1-based) na fila de análise; null quando não aprovada. */
   queuePosition: number | null;
+  /** Pontuação total de priorização (0–100); null quando não aprovada. */
+  priorityScore: number | null;
+  /** Pontuação por critério; null quando a vaga não foi aprovada. */
+  priorityBreakdown: {
+    stack: number;
+    seniority: number;
+    location: number;
+    recency: number;
+    contract: number;
+  } | null;
 }
 
 /** Referência de um anúncio agrupado por equivalência, preservada para auditoria. */
@@ -137,6 +151,7 @@ function toEntry(
   contractClassification: JobContract | null,
   queuePosition: number | null,
   equivalentGroup: string | null,
+  priority: JobPriorityScore | null,
 ): AuditJobEntry {
   return {
     key: generateJobKey(job),
@@ -160,6 +175,17 @@ function toEntry(
     contractClassification,
     equivalentGroup,
     queuePosition,
+    // Pontuação registrada apenas para as vagas aprovadas (com posição na fila).
+    priorityScore: priority?.total ?? null,
+    priorityBreakdown: priority
+      ? {
+          stack: priority.stack,
+          seniority: priority.seniority,
+          location: priority.location,
+          recency: priority.recency,
+          contract: priority.contract,
+        }
+      : null,
   };
 }
 
@@ -210,9 +236,13 @@ export function buildAuditReport(
     }
   }
 
-  // Posição (1-based) na fila de análise.
+  // Posição (1-based) na fila de análise e pontuação de priorização.
   const queuePositions = new Map<Job, number>();
-  prioritizedJobs.forEach((job, index) => queuePositions.set(job, index + 1));
+  const scoresByJob = new Map<Job, JobPriorityScore>();
+  prioritizedJobs.forEach((job, index) => {
+    queuePositions.set(job, index + 1);
+    scoresByJob.set(job, scoreJob(job, referenceDate));
+  });
 
   // Classificação geográfica apenas para quem chegou à etapa de localização.
   const locationByJob = new Map<Job, JobLocation>();
@@ -247,7 +277,7 @@ export function buildAuditReport(
 
     // Anúncio agrupado: não percorre os filtros; aponta para o representante.
     if (representativeKey) {
-      return toEntry(job, null, null, null, null, null, representativeKey);
+      return toEntry(job, null, null, null, null, null, representativeKey, null);
     }
 
     let discardStage: AuditDiscardStage | null = null;
@@ -289,6 +319,7 @@ export function buildAuditReport(
       contractClassification,
       queuePositions.get(job) ?? null,
       null,
+      scoresByJob.get(job) ?? null,
     );
   });
 
