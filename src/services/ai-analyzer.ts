@@ -833,6 +833,51 @@ export function classifyGeminiError(error: unknown): {
 }
 
 /**
+ * Classificação de um status HTTP do Gemini para fins de diagnóstico.
+ *
+ * - `server`: HTTP 408 ou 5xx — indisponibilidade temporária do serviço;
+ * - `client`: demais status HTTP identificáveis (ex.: 400, 404);
+ * - `none`: sem status HTTP identificável (ex.: falha de rede/cota local).
+ */
+export type GeminiHttpStatusClass = "server" | "client" | "none";
+
+/** Classifica o status HTTP de uma falha do Gemini para o diagnóstico de log. */
+export function classifyGeminiHttpStatus(
+  status: number | undefined,
+): GeminiHttpStatusClass {
+  if (status === undefined) {
+    return "none";
+  }
+  if (status === 408 || (status >= 500 && status <= 599)) {
+    return "server";
+  }
+  return "client";
+}
+
+/**
+ * Monta um diagnóstico curto e SEGURO para log a partir de uma falha do Gemini.
+ *
+ * Inclui apenas a categoria (`kind`) e o status HTTP, quando disponível, e
+ * diferencia HTTP 408/5xx (indisponibilidade do serviço) de falhas SEM status
+ * identificável. NUNCA inclui chave da vaga, prompt, dados da vaga, resposta
+ * completa nem mensagem bruta do SDK — apenas sinais estruturados.
+ */
+export function formatGeminiFailureDiagnostic(error: unknown): string {
+  const isGeminiError = error instanceof GeminiAnalysisError;
+  const kind = isGeminiError ? error.kind : "unknown";
+  const status = isGeminiError ? error.status : undefined;
+  const statusClass = classifyGeminiHttpStatus(status);
+
+  if (statusClass === "none") {
+    return `categoria: ${kind} | HTTP: sem status identificável`;
+  }
+  if (statusClass === "server") {
+    return `categoria: ${kind} | HTTP: ${status} (indisponibilidade 408/5xx)`;
+  }
+  return `categoria: ${kind} | HTTP: ${status}`;
+}
+
+/**
  * Analisa uma vaga de tecnologia com o Gemini.
  *
  * A requisição tem tempo máximo ({@link REQUEST_TIMEOUT_MS}) para não travar a

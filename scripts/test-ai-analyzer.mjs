@@ -19,6 +19,10 @@ const {
 const { classifyGeminiError, GeminiAnalysisError } = await import(
   "../dist/services/ai-analyzer.js"
 );
+const {
+  classifyGeminiHttpStatus,
+  formatGeminiFailureDiagnostic,
+} = await import("../dist/services/ai-analyzer.js");
 const { classifyNotification } = await import(
   "../dist/services/notification-policy.js"
 );
@@ -404,4 +408,64 @@ test("GeminiAnalysisError preserva categoria, status e identidade", () => {
   assert.equal(error.name, "GeminiAnalysisError");
   assert.equal(error.kind, "rate_limit");
   assert.equal(error.status, 429);
+});
+
+test("classifyGeminiHttpStatus distingue 408/5xx, outros status e ausência", () => {
+  // 408 e 5xx: indisponibilidade do serviço.
+  for (const status of [408, 500, 502, 503, 504, 599]) {
+    assert.equal(classifyGeminiHttpStatus(status), "server");
+  }
+
+  // Demais status HTTP identificáveis (inclui 429 e 4xx).
+  for (const status of [400, 404, 429]) {
+    assert.equal(classifyGeminiHttpStatus(status), "client");
+  }
+
+  // Sem status identificável.
+  assert.equal(classifyGeminiHttpStatus(undefined), "none");
+});
+
+test("formatGeminiFailureDiagnostic expõe categoria e status, sem dados sensíveis", () => {
+  // 5xx: marcado como indisponibilidade.
+  const unavailable = new GeminiAnalysisError(
+    "unavailable",
+    "Falha ao consultar a API Gemini.",
+    { status: 503 },
+  );
+  assert.equal(
+    formatGeminiFailureDiagnostic(unavailable),
+    "categoria: unavailable | HTTP: 503 (indisponibilidade 408/5xx)",
+  );
+
+  // 408 também é indisponibilidade.
+  assert.equal(
+    formatGeminiFailureDiagnostic(
+      new GeminiAnalysisError("unavailable", "x", { status: 408 }),
+    ),
+    "categoria: unavailable | HTTP: 408 (indisponibilidade 408/5xx)",
+  );
+
+  // 429: status preservado, sem rótulo de indisponibilidade.
+  assert.equal(
+    formatGeminiFailureDiagnostic(
+      new GeminiAnalysisError("rate_limit", "x", { status: 429 }),
+    ),
+    "categoria: rate_limit | HTTP: 429",
+  );
+
+  // Sem status identificável (ex.: falha de cota/rede sem HTTP).
+  assert.equal(
+    formatGeminiFailureDiagnostic(
+      new GeminiAnalysisError("unavailable", "x"),
+    ),
+    "categoria: unavailable | HTTP: sem status identificável",
+  );
+
+  // Erro não reconhecido: categoria "unknown" e sem status; a mensagem bruta
+  // do SDK NÃO é incluída no diagnóstico.
+  const diagnostic = formatGeminiFailureDiagnostic(
+    new Error("detalhe-interno-do-sdk-que-nao-deve-vazar"),
+  );
+  assert.equal(diagnostic, "categoria: unknown | HTTP: sem status identificável");
+  assert.ok(!diagnostic.includes("detalhe-interno"));
 });

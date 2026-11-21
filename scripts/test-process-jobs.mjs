@@ -139,6 +139,59 @@ test("falha global da IA interrompe novas chamadas sem parar o laço", async () 
   });
 });
 
+test("log da falha do Gemini traz categoria e status HTTP, sem mensagem bruta", async () => {
+  await withTempDir(async () => {
+    const logs = [];
+    const originalError = console.error;
+    console.error = (...args) => {
+      logs.push(args.join(" "));
+    };
+
+    let withStatus;
+    let withoutStatus;
+    try {
+      // Falha com status HTTP identificável (503 = indisponibilidade).
+      withStatus = await processJobs([job({ id: "diag-status" })], {
+        analyzeBatch: async () => {
+          // A mensagem bruta (potencialmente do SDK) NÃO deve vazar no log.
+          throw new GeminiAnalysisError(
+            "unavailable",
+            "detalhe-interno-que-nao-deve-vazar",
+            { status: 503 },
+          );
+        },
+        notify: async () => true,
+      });
+
+      // Falha sem status identificável (ex.: cota/rede sem HTTP).
+      withoutStatus = await processJobs([job({ id: "diag-no-status" })], {
+        analyzeBatch: async () => {
+          throw new GeminiAnalysisError("unavailable", "IA fora do ar");
+        },
+        notify: async () => true,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    assert.equal(withStatus.failedAnalyses, 1);
+    assert.equal(withoutStatus.failedAnalyses, 1);
+
+    const failureLogs = logs.filter((line) =>
+      line.includes("Falha na análise do lote"),
+    );
+    assert.equal(failureLogs.length, 2);
+    // Categoria e status HTTP presentes; 408/5xx marcado como indisponibilidade.
+    assert.ok(failureLogs[0].includes("categoria: unavailable"));
+    assert.ok(failureLogs[0].includes("HTTP: 503 (indisponibilidade 408/5xx)"));
+    // Falha sem status é diferenciada das 408/5xx.
+    assert.ok(failureLogs[1].includes("categoria: unavailable"));
+    assert.ok(failureLogs[1].includes("HTTP: sem status identificável"));
+    // Nenhuma mensagem bruta do SDK é exposta.
+    assert.ok(failureLogs.every((line) => !line.includes("detalhe-interno")));
+  });
+});
+
 test("análises salvas continuam sendo reaproveitadas após a IA ficar indisponível", async () => {
   await withTempDir(async () => {
     // Vaga com análise salva da versão vigente.
