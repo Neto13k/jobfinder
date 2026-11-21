@@ -12,6 +12,7 @@ import { fetchIndeedJobs } from "./providers/indeed.js";
 import {
   analyzeJobs,
   estimatePromptTokens,
+  formatGeminiFailureDiagnostic,
   GeminiAnalysisError,
   resolveBatchSize,
   resolveConfiguredBatchSize,
@@ -639,10 +640,12 @@ export async function processJobs(
       summary.failedAnalyses += current.length;
       const kind =
         error instanceof GeminiAnalysisError ? error.kind : "unknown";
-      const message = error instanceof Error ? error.message : String(error);
+      // Log de diagnóstico: apenas categoria e status HTTP (quando houver),
+      // diferenciando HTTP 408/5xx de falhas sem status identificável. Nunca
+      // registra chaves, prompts, dados da vaga nem mensagens brutas do SDK.
       console.error(
         `Falha na análise do lote de ${current.length} vaga(s) | ` +
-          `categoria: ${kind} | ${message}`,
+          formatGeminiFailureDiagnostic(error),
       );
 
       // As vagas do PRÓPRIO lote que falhou também ficam pendentes: sem este
