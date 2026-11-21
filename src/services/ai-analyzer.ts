@@ -877,6 +877,72 @@ export function formatGeminiFailureDiagnostic(error: unknown): string {
   return `categoria: ${kind} | HTTP: ${status}`;
 }
 
+/** HTTP 503 (Service Unavailable): a ÚNICA falha que admite retentativa. */
+export const RETRYABLE_GEMINI_HTTP_STATUS = 503;
+
+/**
+ * Máximo de tentativas ADICIONAIS por lote quando o Gemini responde HTTP 503.
+ *
+ * A tentativa inicial não conta como retentativa: o total é 1 + 2 = 3
+ * requisições, no máximo, para o mesmo lote.
+ */
+export const MAX_GEMINI_503_RETRIES = 2;
+
+/** Atraso base da espera exponencial entre tentativas, em milissegundos. */
+export const RETRY_BASE_DELAY_MS = 1_000;
+
+/** Fração máxima do jitter aplicado sobre o atraso exponencial (50%). */
+const RETRY_JITTER_RATIO = 0.5;
+
+/**
+ * Indica se a falha admite retentativa — isto é, se é um HTTP 503 do Gemini.
+ *
+ * Baseia-se exclusivamente no `status` estruturado de {@link GeminiAnalysisError};
+ * nunca na mensagem bruta do SDK. Qualquer outro status (inclui 5xx distintos de
+ * 503) ou categoria NÃO é repetido, preservando o comportamento existente.
+ */
+export function isRetryableGeminiError(error: unknown): boolean {
+  return (
+    error instanceof GeminiAnalysisError &&
+    error.status === RETRYABLE_GEMINI_HTTP_STATUS
+  );
+}
+
+/**
+ * Espera exponencial com jitter para a retentativa `retryNumber` (1-based).
+ *
+ * `delay = base * 2^(retryNumber - 1) * (1 + jitter)`, com jitter proporcional
+ * em `[0, RETRY_JITTER_RATIO)` derivado de `random` em `[0, 1]`. O parâmetro
+ * `random` permite testes determinísticos; valores fora da faixa são saturados.
+ *
+ * @param retryNumber Número da retentativa (1 = primeira).
+ * @param random Valor aleatório em `[0, 1]`.
+ * @returns O atraso, em milissegundos.
+ */
+export function computeRetryBackoffMs(
+  retryNumber: number,
+  random: number,
+): number {
+  const exponential = RETRY_BASE_DELAY_MS * 2 ** (retryNumber - 1);
+  const safeRandom = Number.isFinite(random)
+    ? Math.min(Math.max(random, 0), 1)
+    : 0;
+  return Math.round(exponential * (1 + RETRY_JITTER_RATIO * safeRandom));
+}
+
+/**
+ * Monta o diagnóstico SEGURO de uma retentativa: o número da tentativa
+ * (`attempt`/`maxAttempts`) seguido do diagnóstico padrão (categoria + status
+ * HTTP). Nunca inclui chave da vaga, prompt, dados da vaga nem mensagem bruta.
+ */
+export function formatGeminiRetryDiagnostic(
+  attempt: number,
+  maxAttempts: number,
+  error: unknown,
+): string {
+  return `tentativa ${attempt}/${maxAttempts} | ${formatGeminiFailureDiagnostic(error)}`;
+}
+
 /**
  * Analisa uma vaga de tecnologia com o Gemini.
  *

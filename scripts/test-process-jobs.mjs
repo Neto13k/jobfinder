@@ -577,3 +577,214 @@ test("revisão recuperada do histórico continua elegível após esgotar o limit
     assert.equal(summary.analyzed, 10);
   });
 });
+
+test("retenta HTTP 503 até o sucesso, limitado a duas tentativas adicionais", async () => {
+  await withTempDir(async () => {
+    const jobs = [job({ id: "a" }), job({ id: "b" })];
+    const delays = [];
+    let batchCalls = 0;
+
+    const summary = await processJobs(jobs, {
+      analyzeBatch: async (batch) => {
+        batchCalls++;
+        // Falha nas DUAS primeiras tentativas (HTTP 503) e sucede na terceira:
+        // exatamente o limite de duas retentativas adicionais.
+        if (batchCalls < 3) {
+          throw new GeminiAnalysisError("unavailable", "serviço indisponível", {
+            status: 503,
+          });
+        }
+        const map = new Map();
+        for (const item of batch) {
+          map.set(dedup.generateJobKey(item), analysis({ score: 90 }));
+        }
+        return map;
+      },
+      notify: async () => true,
+      // Sem espera real; registra os atrasos para conferir o backoff.
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      random: () => 0,
+    });
+
+    // Três requisições reais (1 inicial + 2 retentativas) até o sucesso.
+    assert.equal(batchCalls, 3);
+    assert.equal(summary.analyzed, 2);
+    assert.equal(summary.failedAnalyses, 0);
+    // Espera exponencial determinística (random = 0): 1000 ms e 2000 ms.
+    assert.deepEqual(delays, [1000, 2000]);
+  });
+});
+
+test("esgota as retentativas de HTTP 503 e interrompe novas análises", async () => {
+  await withTempDir(async () => {
+    const jobs = Array.from({ length: 7 }, (_, index) =>
+      job({ id: `job-${index}` }),
+    );
+    const logs = [];
+    const originalError = console.error;
+    console.error = (...args) => {
+      logs.push(args.join(" "));
+    };
+
+    let batchCalls = 0;
+    let notifyCalls = 0;
+    let summary;
+    try {
+      summary = await processJobs(jobs, {
+        analyzeBatch: async () => {
+          batchCalls++;
+          // Mensagem bruta (potencialmente do SDK) que NÃO deve vazar no log.
+          throw new GeminiAnalysisError("unavailable", "mensagem-bruta-do-sdk", {
+            status: 503,
+          });
+        },
+        notify: async () => {
+          notifyCalls++;
+          return true;
+        },
+        sleep: async () => {},
+        random: () => 0,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    // 1 tentativa inicial + 2 retentativas = 3 requisições reais do 1º lote; as
+    // demais vagas ficam pendentes por indisponibilidade, sem parar o laço.
+    assert.equal(batchCalls, 3);
+    assert.equal(summary.failedAnalyses, 5);
+    assert.equal(summary.unanalyzedByGemini, 2);
+    assert.equal(summary.analyzed, 0);
+    assert.equal(notifyCalls, 0);
+
+    // Cada retentativa é registrada com o número da tentativa e o status HTTP.
+    const retryLogs = logs.filter((line) => line.includes("retentando"));
+    assert.equal(retryLogs.length, 2);
+    assert.ok(retryLogs[0].includes("tentativa 1/3"));
+    assert.ok(retryLogs[1].includes("tentativa 2/3"));
+    assert.ok(retryLogs.every((line) => line.includes("HTTP: 503")));
+    // Nenhuma mensagem bruta do SDK é exposta.
+    assert.ok(logs.every((line) => !line.includes("mensagem-bruta-do-sdk")));
+  });
+});
+
+test("não retenta falhas que não sejam HTTP 503", async () => {
+  await withTempDir(async () => {
+    for (const error of [
+      new GeminiAnalysisError("unavailable", "500", { status: 500 }),
+      new GeminiAnalysisError("unavailable", "504", { status: 504 }),
+      new GeminiAnalysisError("rate_limit", "429", { status: 429 }),
+      new GeminiAnalysisError("unavailable", "sem status"),
+    ]) {
+      let batchCalls = 0;
+      let sleepCalls = 0;
+
+      const summary = await processJobs([job({ id: "a" })], {
+        analyzeBatch: async () => {
+          batchCalls++;
+          throw error;
+        },
+        notify: async () => true,
+        sleep: async () => {
+          sleepCalls++;
+        },
+        random: () => 0,
+      });
+
+      // Uma única requisição, sem retentativa e sem espera.
+      assert.equal(batchCalls, 1);
+      assert.equal(sleepCalls, 0);
+      assert.equal(summary.failedAnalyses, 1);
+    }
+  });
+});
+
+test("reserva a cota persistente antes de cada tentativa HTTP 503", async () => {
+  await withTempDir(async () => {
+    const acquires = [];
+    let batchCalls = 0;
+
+    await processJobs([job({ id: "q" })], {
+      analyzeBatch: async () => {
+        batchCalls++;
+        throw new GeminiAnalysisError("unavailable", "503", { status: 503 });
+      },
+      notify: async () => true,
+      sleep: async () => {},
+      random: () => 0,
+      quota: {
+        snapshot: { jobBudget: 25 },
+        async acquire(tokens) {
+          acquires.push(tokens);
+        },
+      },
+    });
+
+    // 3 tentativas = 3 reservas de cota, com os MESMOS tokens estimados: cada
+    // retentativa revalida cota, intervalo, tokens e tempo antes da chamada.
+    assert.equal(batchCalls, 3);
+    assert.equal(acquires.length, 3);
+    assert.ok(acquires[0] > 0);
+    assert.ok(acquires.every((tokens) => tokens === acquires[0]));
+  });
+});
+
+test("interrompe quando a cota persistente bloqueia antes da tentativa", async () => {
+  await withTempDir(async () => {
+    // (a) Cota já esgotada: a reserva falha ANTES de qualquer chamada HTTP e,
+    // como não é HTTP 503, não há retentativa.
+    let callsBlocked = 0;
+    let sleepBlocked = 0;
+    const summaryBlocked = await processJobs([job({ id: "blocked" })], {
+      analyzeBatch: async () => {
+        callsBlocked++;
+        return new Map();
+      },
+      notify: async () => true,
+      sleep: async () => {
+        sleepBlocked++;
+      },
+      random: () => 0,
+      quota: {
+        snapshot: { jobBudget: 25 },
+        async acquire() {
+          throw new GeminiAnalysisError("rate_limit", "orçamento esgotado");
+        },
+      },
+    });
+
+    assert.equal(callsBlocked, 0);
+    assert.equal(sleepBlocked, 0);
+    assert.equal(summaryBlocked.failedAnalyses, 1);
+
+    // (b) Cota permite a inicial e UMA retentativa e bloqueia a terceira
+    // reserva: a falha de cota interrompe as retentativas sem emitir nova
+    // requisição, mesmo com a IA respondendo 503.
+    let callsPartial = 0;
+    let grants = 0;
+    const summaryPartial = await processJobs([job({ id: "partial" })], {
+      analyzeBatch: async () => {
+        callsPartial++;
+        throw new GeminiAnalysisError("unavailable", "503", { status: 503 });
+      },
+      notify: async () => true,
+      sleep: async () => {},
+      random: () => 0,
+      quota: {
+        snapshot: { jobBudget: 25 },
+        async acquire() {
+          grants++;
+          if (grants > 2) {
+            throw new GeminiAnalysisError("rate_limit", "orçamento esgotado");
+          }
+        },
+      },
+    });
+
+    // Inicial + 1 retentativa = 2 chamadas HTTP; a 3ª reserva falha e para.
+    assert.equal(callsPartial, 2);
+    assert.equal(summaryPartial.failedAnalyses, 1);
+  });
+});

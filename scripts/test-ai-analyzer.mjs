@@ -23,6 +23,13 @@ const {
   classifyGeminiHttpStatus,
   formatGeminiFailureDiagnostic,
 } = await import("../dist/services/ai-analyzer.js");
+const {
+  isRetryableGeminiError,
+  computeRetryBackoffMs,
+  formatGeminiRetryDiagnostic,
+  RETRY_BASE_DELAY_MS,
+  MAX_GEMINI_503_RETRIES,
+} = await import("../dist/services/ai-analyzer.js");
 const { classifyNotification } = await import(
   "../dist/services/notification-policy.js"
 );
@@ -467,5 +474,81 @@ test("formatGeminiFailureDiagnostic expõe categoria e status, sem dados sensív
     new Error("detalhe-interno-do-sdk-que-nao-deve-vazar"),
   );
   assert.equal(diagnostic, "categoria: unknown | HTTP: sem status identificável");
+  assert.ok(!diagnostic.includes("detalhe-interno"));
+});
+
+test("isRetryableGeminiError aceita apenas HTTP 503", () => {
+  // Somente 503 admite retentativa.
+  assert.equal(
+    isRetryableGeminiError(
+      new GeminiAnalysisError("unavailable", "x", { status: 503 }),
+    ),
+    true,
+  );
+
+  // Demais 5xx (inclui 408 e 504) NÃO são repetidos.
+  for (const status of [408, 429, 500, 502, 504]) {
+    assert.equal(
+      isRetryableGeminiError(
+        new GeminiAnalysisError("unavailable", "x", { status }),
+      ),
+      false,
+    );
+  }
+
+  // Sem status identificável e erros não reconhecidos não são repetidos.
+  assert.equal(
+    isRetryableGeminiError(new GeminiAnalysisError("unavailable", "x")),
+    false,
+  );
+  assert.equal(isRetryableGeminiError(new Error("x")), false);
+});
+
+test("computeRetryBackoffMs cresce exponencialmente com jitter limitado", () => {
+  // Sem jitter (random = 0): base * 2^(n-1), exato.
+  assert.equal(computeRetryBackoffMs(1, 0), RETRY_BASE_DELAY_MS);
+  assert.equal(computeRetryBackoffMs(2, 0), RETRY_BASE_DELAY_MS * 2);
+  assert.equal(computeRetryBackoffMs(3, 0), RETRY_BASE_DELAY_MS * 4);
+
+  // Jitter máximo (random = 1): +50% sobre o valor exponencial.
+  assert.equal(
+    computeRetryBackoffMs(1, 1),
+    Math.round(RETRY_BASE_DELAY_MS * 1.5),
+  );
+
+  // Dentro da faixa [base * 2^(n-1), +50%] e crescente entre retentativas.
+  for (const random of [0, 0.25, 0.5, 0.75, 1]) {
+    const retry1 = computeRetryBackoffMs(1, random);
+    const retry2 = computeRetryBackoffMs(2, random);
+    assert.ok(retry1 >= RETRY_BASE_DELAY_MS && retry1 <= RETRY_BASE_DELAY_MS * 1.5);
+    assert.ok(retry2 > retry1);
+  }
+
+  // Entradas fora da faixa são saturadas (nunca atraso negativo ou infinito).
+  assert.equal(computeRetryBackoffMs(1, -5), RETRY_BASE_DELAY_MS);
+  assert.equal(
+    computeRetryBackoffMs(1, 9),
+    Math.round(RETRY_BASE_DELAY_MS * 1.5),
+  );
+  assert.equal(computeRetryBackoffMs(1, Number.NaN), RETRY_BASE_DELAY_MS);
+
+  // Total de tentativas por lote = inicial + MAX_GEMINI_503_RETRIES (2).
+  assert.equal(MAX_GEMINI_503_RETRIES, 2);
+});
+
+test("formatGeminiRetryDiagnostic inclui tentativa e status, sem dados sensíveis", () => {
+  const diagnostic = formatGeminiRetryDiagnostic(
+    2,
+    3,
+    new GeminiAnalysisError("unavailable", "detalhe-interno-nao-deve-vazar", {
+      status: 503,
+    }),
+  );
+
+  assert.equal(
+    diagnostic,
+    "tentativa 2/3 | categoria: unavailable | HTTP: 503 (indisponibilidade 408/5xx)",
+  );
+  // A mensagem bruta do SDK NÃO é exposta.
   assert.ok(!diagnostic.includes("detalhe-interno"));
 });

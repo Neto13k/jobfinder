@@ -11,9 +11,13 @@ import { fetchLinkedInJobs } from "./providers/linkedin.js";
 import { fetchIndeedJobs } from "./providers/indeed.js";
 import {
   analyzeJobs,
+  computeRetryBackoffMs,
   estimatePromptTokens,
   formatGeminiFailureDiagnostic,
+  formatGeminiRetryDiagnostic,
   GeminiAnalysisError,
+  isRetryableGeminiError,
+  MAX_GEMINI_503_RETRIES,
   resolveBatchSize,
   resolveConfiguredBatchSize,
   type JobAnalysis,
@@ -382,6 +386,74 @@ export interface ProcessDependencies {
    * lança GeminiAnalysisError e novas chamadas são interrompidas.
    */
   quota?: GeminiQuotaManager;
+  /**
+   * Espera entre retentativas de HTTP 503, em milissegundos. Injetável nos
+   * testes para não aguardar tempo real; padrão: `setTimeout`.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Fonte de aleatoriedade em `[0, 1]` usada no jitter das retentativas.
+   * Injetável nos testes para torná-los determinísticos; padrão: `Math.random`.
+   */
+  random?: () => number;
+}
+
+/** Espera padrão entre retentativas (substituível nos testes). */
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(() => resolve(), ms);
+  });
+
+/**
+ * Envia um lote ao Gemini com retentativas LIMITADAS para HTTP 503.
+ *
+ * Antes de CADA tentativa HTTP real — incluindo cada retentativa — reserva a
+ * cota persistente (`quota.acquire`), revalidando cota diária, intervalo mínimo,
+ * tokens de entrada por minuto e orçamento de tempo: uma retentativa nunca fura
+ * esses limites. Apenas HTTP 503 (indisponibilidade temporária do serviço) é
+ * repetido, no máximo {@link MAX_GEMINI_503_RETRIES} vezes, com espera
+ * exponencial e jitter. Qualquer outro erro — ou o esgotamento das tentativas —
+ * propaga a falha original, preservando o comportamento existente de
+ * interromper novas análises e deixar as vagas do lote pendentes.
+ *
+ * O SDK `@google/genai` NÃO repete chamadas quando `retryOptions` é omitido
+ * (confirmado na versão instalada), de modo que a contagem de requisições
+ * reflete exatamente as tentativas feitas aqui e a cota não é cobrada duas vezes.
+ */
+async function analyzeBatchWithRetry(
+  jobs: Job[],
+  deps: ProcessDependencies,
+): Promise<Map<string, JobAnalysis>> {
+  const maxAttempts = MAX_GEMINI_503_RETRIES + 1;
+  const wait = deps.sleep ?? defaultSleep;
+  const random = deps.random ?? Math.random;
+
+  for (let attempt = 1; ; attempt++) {
+    // Reserva a cota ANTES de cada tentativa HTTP real: cota, intervalo, tokens
+    // e tempo são revalidados a cada reserva, inclusive nas retentativas.
+    if (deps.quota) {
+      await deps.quota.acquire(estimatePromptTokens(jobs));
+    }
+
+    try {
+      return await deps.analyzeBatch(jobs);
+    } catch (error) {
+      // Só HTTP 503 admite retentativa, e no máximo MAX_GEMINI_503_RETRIES
+      // adicionais; qualquer outro erro (ou o fim das tentativas) propaga a
+      // falha original, sem alterar o tratamento posterior no flushBatch.
+      if (!isRetryableGeminiError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      // Log SEGURO: número da tentativa e status HTTP (categoria + status),
+      // sem chaves, prompts, dados da vaga nem mensagens brutas do SDK.
+      console.error(
+        `HTTP 503 na análise do lote de ${jobs.length} vaga(s); retentando | ` +
+          formatGeminiRetryDiagnostic(attempt, maxAttempts, error),
+      );
+      await wait(computeRetryBackoffMs(attempt, random()));
+    }
+  }
 }
 
 /** Dependências reais usadas em produção. */
@@ -595,13 +667,15 @@ export async function processJobs(
    *
    * Antes de enviar, recalcula o saldo restante e limita o lote a ele, de modo
    * que o limite de vagas da execução (`jobLimit`) nunca seja ultrapassado. A
-   * cota é reservada de forma atômica antes da requisição. Cada vaga é
-   * identificada pela chave "source:id"; resultados ausentes, inválidos, com
+   * cota é reservada de forma atômica antes de CADA tentativa HTTP, inclusive
+   * nas retentativas de HTTP 503 (ver {@link analyzeBatchWithRetry}). Cada vaga
+   * é identificada pela chave "source:id"; resultados ausentes, inválidos, com
    * chave desconhecida ou duplicados conflitantes consomem a tentativa da vaga,
    * mas são descartados sem invalidar os resultados válidos nem o restante da
-   * execução. Uma falha global (cota, indisponibilidade, rede ou autenticação)
-   * interrompe as próximas requisições, preservando as análises salvas e
-   * deixando as vagas pendentes para a próxima execução.
+   * execução. Uma falha global (cota, indisponibilidade, rede ou autenticação) —
+   * inclusive o esgotamento das retentativas de HTTP 503 — interrompe as
+   * próximas requisições, preservando as análises salvas e deixando as vagas
+   * pendentes para a próxima execução.
    */
   const flushBatch = async (): Promise<void> => {
     if (batch.length === 0) {
@@ -625,17 +699,14 @@ export async function processJobs(
 
     let results: Map<string, JobAnalysis>;
     try {
-      // Reserva a cota ANTES da requisição: cada TENTATIVA consome uma reserva,
-      // inclusive quando a chamada falha depois (falhas e retries contam).
-      // Esgotar a cota, o orçamento da execução, o tempo ou os TOKENS de entrada
-      // do prompt completo — ou falhar o controle — lança GeminiAnalysisError e
-      // cai no tratamento abaixo, que interrompe novas chamadas sem derrubar o
-      // laço.
-      if (deps.quota) {
-        await deps.quota.acquire(estimatePromptTokens(current));
-      }
-
-      results = await deps.analyzeBatch(current);
+      // Reserva a cota ANTES de cada tentativa HTTP real e repete HTTP 503 até
+      // MAX_GEMINI_503_RETRIES vezes (com espera exponencial e jitter). Cada
+      // tentativa — inclusive as retentativas — consome uma reserva: falhas e
+      // retries contam. Esgotar a cota, o orçamento da execução, o tempo ou os
+      // TOKENS de entrada do prompt completo — ou falhar o controle — lança
+      // GeminiAnalysisError e cai no tratamento abaixo, que interrompe novas
+      // chamadas sem derrubar o laço.
+      results = await analyzeBatchWithRetry(current, deps);
     } catch (error) {
       summary.failedAnalyses += current.length;
       const kind =
