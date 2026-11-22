@@ -175,8 +175,17 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
     seniority: 1,
     location: 1,
     contract: 0,
+    recency: 0,
   });
   assert.equal(report.approved, 3);
+  // Nenhuma vaga fora do limite de recência nestas fixtures (datas recentes ou
+  // ausentes): a recência não exclui ninguém e as ausentes são preservadas.
+  assert.deepEqual(report.recencyMetrics, {
+    checked: 3,
+    stale: 0,
+    missingDate: 1,
+    invalidDate: 0,
+  });
   assert.deepEqual(report.locationDistribution, {
     allowed: 3,
     blocked: 1,
@@ -198,7 +207,8 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
       report.discarded.developer +
       report.discarded.seniority +
       report.discarded.location +
-      report.discarded.contract,
+      report.discarded.contract +
+      report.discarded.recency,
   );
 
   // Sem limite de exemplos: todas as vagas únicas entram no relatório.
@@ -218,6 +228,7 @@ test("relatório de auditoria registra todas as vagas únicas e o desfecho de ca
       "groupedByEquivalence",
       "jobs",
       "locationDistribution",
+      "recencyMetrics",
       "totalCollected",
       "uniqueJobs",
     ].sort(),
@@ -375,6 +386,7 @@ test("relatório de auditoria registra agrupamento por equivalência e descarte 
     seniority: 0,
     location: 0,
     contract: 1,
+    recency: 0,
   });
   assert.equal(report.approved, 2);
   assert.deepEqual(report.contractDistribution, {
@@ -392,7 +404,8 @@ test("relatório de auditoria registra agrupamento por equivalência e descarte 
       report.discarded.developer +
       report.discarded.seniority +
       report.discarded.location +
-      report.discarded.contract,
+      report.discarded.contract +
+      report.discarded.recency,
   );
 
   // O grupo preserva o representante estável (menor chave "source:id") e o

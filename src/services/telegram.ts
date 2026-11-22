@@ -29,17 +29,85 @@ export class TelegramDeliveryError extends Error {
   }
 }
 
+/**
+ * Rótulo de modalidade a partir dos sinais estruturados da fonte.
+ *
+ * O campo `workplaceType` é autoritativo quando presente; o booleano `remote` é
+ * usado como reserva. Retorna null quando a modalidade é desconhecida — nunca é
+ * inferida por ausência de sinal.
+ */
+function describeModality(job: Job): string | null {
+  switch (job.workplaceType) {
+    case "remote":
+      return "Remoto";
+    case "hybrid":
+      return "Híbrido";
+    case "onsite":
+      return "Presencial";
+  }
+
+  if (job.remote === true) {
+    return "Remoto";
+  }
+
+  return null;
+}
+
+/**
+ * Tipos de contratação informados pela fonte, sem duplicatas; null quando
+ * ausentes. O Telegram precisa da informação explícita, então nada é inferido.
+ */
+function describeContract(job: Job): string | null {
+  const types = (job.contractTypes ?? [])
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+
+  if (types.length === 0) {
+    return null;
+  }
+
+  return Array.from(new Set(types)).join(", ");
+}
+
+/**
+ * Acrescenta à mensagem as informações da vaga conhecidas (modalidade, tipo de
+ * contratação e data de publicação), omitindo as que a fonte não informou.
+ */
+function appendKnownDetails(lines: string[], job: Job): void {
+  const modality = describeModality(job);
+  if (modality) {
+    lines.push(`Modalidade: ${modality}`);
+  }
+
+  const contract = describeContract(job);
+  if (contract) {
+    lines.push(`Contratação: ${contract}`);
+  }
+
+  if (job.publishedAt && job.publishedAt.trim() !== "") {
+    lines.push(`Publicado em: ${job.publishedAt}`);
+  }
+}
+
 // Monta a mensagem da vaga compatível em texto simples, sem HTML ou Markdown.
 function buildMessage(job: Job, analysis: JobAnalysis): string {
-  return [
+  const lines = [
     `Cargo: ${job.title}`,
     `Empresa: ${job.company}`,
     `Localização: ${job.location}`,
+  ];
+
+  appendKnownDetails(lines, job);
+
+  lines.push(
     `Pontuação: ${analysis.score}`,
     `Decisão: ${analysis.decision}`,
     `Justificativa: ${analysis.reason}`,
     `URL: ${job.url}`,
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 // Monta a mensagem de revisão manual, deixando claro que a vaga não foi
@@ -62,11 +130,16 @@ function buildReviewMessage(job: Job, analysis: JobAnalysis): string {
       ? `Confirmar antes de se candidatar: ${pending.join(" e ")}.`
       : "Confirmar antes de se candidatar: os requisitos da vaga e o motivo da revisão acima.";
 
-  return [
+  const lines = [
     "⚠️ VAGA PARA REVISÃO MANUAL — NÃO CONFIRMADA",
     `Cargo: ${job.title}`,
     `Empresa: ${job.company}`,
     `Localização: ${job.location}`,
+  ];
+
+  appendKnownDetails(lines, job);
+
+  lines.push(
     `Pontuação da IA: ${analysis.score}`,
     `Motivo da revisão: ${analysis.reason}`,
     `Status da localização: ${analysis.locationStatus}`,
@@ -74,7 +147,9 @@ function buildReviewMessage(job: Job, analysis: JobAnalysis): string {
     `Link: ${job.url}`,
     "",
     confirmation,
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 // Valida as credenciais, envia o texto e confirma a resposta do Telegram.
