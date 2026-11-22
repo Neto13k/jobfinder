@@ -41,6 +41,15 @@ import {
 import { filterDeveloperJobs } from "./services/job-filter.js";
 import { prioritizeJobs } from "./services/job-priority.js";
 import {
+  evaluateJobAvailability,
+  resolveAvailabilityConfig,
+  type JobAvailability,
+} from "./services/job-availability.js";
+import {
+  filterByRecency,
+  resolveRecencyCutoffDays,
+} from "./services/recency-filter.js";
+import {
   classifyJobLocation,
   filterByLocation,
   type JobLocation,
@@ -188,7 +197,8 @@ type SkipReason =
   | "notifications_disabled"
   | "reviews_disabled"
   | "already_notified"
-  | "run_limit";
+  | "run_limit"
+  | "closed";
 
 /** Rótulos, em português, de cada motivo de não notificação. */
 const SKIP_REASON_LABELS: Record<SkipReason, string> = {
@@ -199,6 +209,7 @@ const SKIP_REASON_LABELS: Record<SkipReason, string> = {
   reviews_disabled: "alertas de revisão desativados",
   already_notified: "vaga já notificada ou reservada",
   run_limit: "limite de notificações por execução",
+  closed: "vaga confirmadamente encerrada",
 };
 
 /**
@@ -387,6 +398,13 @@ export interface ProcessDependencies {
    */
   quota?: GeminiQuotaManager;
   /**
+   * Avalia a disponibilidade das vagas candidatas antes de notificar. Opcional
+   * e usado apenas quando a verificação está habilitada
+   * (`JOBFINDER_VERIFY_OPEN_JOBS`); injetável nos testes. Devolve "unknown" no
+   * que não puder confirmar, preservando a notificação.
+   */
+  checkAvailability?: (jobs: Job[]) => Promise<Map<Job, JobAvailability>>;
+  /**
    * Espera entre retentativas de HTTP 503, em milissegundos. Injetável nos
    * testes para não aguardar tempo real; padrão: `setTimeout`.
    */
@@ -548,6 +566,7 @@ export async function processJobs(
     reviews_disabled: 0,
     already_notified: 0,
     run_limit: 0,
+    closed: 0,
   };
 
   /** Contabiliza e registra o motivo pelo qual a vaga não gera notificação. */
@@ -868,10 +887,29 @@ export async function processJobs(
     })),
   ];
 
+  // Verificação conservadora de disponibilidade (opt-in, padrão DESLIGADA):
+  // consulta o catálogo público de Greenhouse/Lever para as candidatas e marca
+  // como "closed" apenas as vagas confirmadamente ausentes. Falha, timeout ou
+  // fonte sem catálogo resultam em "unknown" e preservam a notificação.
+  const availabilityConfig = resolveAvailabilityConfig();
+  const availabilityByJob =
+    availabilityConfig.enabled && queue.length > 0
+      ? await (deps.checkAvailability ?? evaluateJobAvailability)(
+          queue.map(({ candidate }) => candidate.job),
+        )
+      : null;
+
   let sent = 0;
 
   for (const { candidate, kind } of queue) {
     const { job } = candidate;
+
+    // Vaga confirmadamente encerrada: não notifica nem consome o limite; a
+    // incerteza (unknown) mantém o envio conforme a política existente.
+    if (availabilityByJob?.get(job) === "closed") {
+      registerSkip(job, "closed");
+      continue;
+    }
 
     if (sent >= MAX_NOTIFICATIONS) {
       registerSkip(job, "run_limit");
@@ -1006,8 +1044,22 @@ export async function runPipeline(
   const seniorityJobs = filterBySeniority(developerJobs);
   const locationJobs = filterByLocation(seniorityJobs);
   const contractJobs = filterByContract(locationJobs);
+  // Recência: exclui anúncios comprovadamente antigos ANTES da priorização e,
+  // portanto, antes da reserva de cota e da chamada ao Gemini. Uma única
+  // referência temporal é usada na triagem e na priorização desta execução.
+  // Vagas sem data ou com data inválida/futura são preservadas.
+  const referenceDate = options.referenceDate ?? new Date();
+  const recencyCutoffDays = resolveRecencyCutoffDays();
+  const {
+    jobs: recentJobs,
+    excluded: staleJobs,
+    metrics: recencyMetrics,
+  } = filterByRecency(contractJobs, {
+    referenceDate,
+    cutoffDays: recencyCutoffDays,
+  });
   // Ordena por prioridade geográfica sem descartar vagas elegíveis.
-  const prioritizedJobs = prioritizeJobs(contractJobs);
+  const prioritizedJobs = prioritizeJobs(recentJobs, referenceDate);
 
   // Grupos descartados por etapa, derivados por identidade de objeto (os
   // filtros preservam as referências), sem alterar as regras de elegibilidade.
@@ -1059,6 +1111,9 @@ export async function runPipeline(
   console.log(`Após senioridade: ${seniorityJobs.length}`);
   console.log(`Após localização: ${locationJobs.length}`);
   console.log(`Após contratação: ${contractJobs.length}`);
+  console.log(
+    `Após recência (> ${recencyCutoffDays} dia(s)): ${recentJobs.length}`,
+  );
   console.log(`Armazenamento: ${getStorageBackend()}`);
   console.log(`Limite de vagas nesta execução: ${jobLimit}`);
   console.log(`Vagas por requisição ao Gemini (lote): ${BATCH_SIZE}`);
@@ -1072,6 +1127,14 @@ export async function runPipeline(
   logJobGroup("Bloqueadas por localização", blockedByLocation);
   logJobGroup("Localização indefinida", unknownLocationJobs);
   logJobGroup("Bloqueadas por contratação", discardedByContract);
+  // Recência: métricas claras de verificadas, antigas excluídas e preservadas.
+  logJobGroup("Excluídas por recência", staleJobs);
+  console.log(
+    `Recência — verificadas: ${recencyMetrics.checked} | ` +
+      `antigas excluídas: ${recencyMetrics.stale} | ` +
+      `sem data preservadas: ${recencyMetrics.missingDate} | ` +
+      `data inválida preservadas: ${recencyMetrics.invalidDate}`,
+  );
 
   // Os grupos de equivalência preservam identificadores e URLs para auditoria.
   for (const group of equivalentGroups) {

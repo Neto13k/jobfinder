@@ -28,6 +28,12 @@ import {
   filterBySeniority,
   seniorityDiscardReason,
 } from "./seniority-filter.js";
+import {
+  filterByRecency,
+  recencyDiscardReason,
+  resolveRecencyCutoffDays,
+  type RecencyMetrics,
+} from "./recency-filter.js";
 import type { Job, JobWorkplaceType } from "../types/job.js";
 
 /** Etapa do pipeline que descartou a vaga. */
@@ -35,7 +41,8 @@ export type AuditDiscardStage =
   | "developer"
   | "seniority"
   | "location"
-  | "contract";
+  | "contract"
+  | "recency";
 
 /** Uma vaga única coletada, com o desfecho na triagem atual. */
 export interface AuditJobEntry {
@@ -114,11 +121,14 @@ export interface AuditReport {
     seniority: number;
     location: number;
     contract: number;
+    recency: number;
   };
   approved: number;
   uniqueJobs: number;
   locationDistribution: Record<JobLocation, number>;
   contractDistribution: Record<JobContract, number>;
+  /** Métricas do filtro de recência (verificadas, antigas e preservadas). */
+  recencyMetrics: RecencyMetrics;
   /** Grupos de anúncios equivalentes, com identificadores e URLs para auditoria. */
   equivalentGroups: AuditEquivalentGroup[];
   jobs: AuditJobEntry[];
@@ -206,6 +216,7 @@ function toEntry(
 export function buildAuditReport(
   jobs: Job[],
   referenceDate: Date = new Date(),
+  cutoffDays: number = resolveRecencyCutoffDays(),
 ): AuditReport {
   const collectedByProvider: Record<string, number> = {};
   for (const job of jobs) {
@@ -220,13 +231,19 @@ export function buildAuditReport(
   const seniorityJobs = filterBySeniority(developerJobs);
   const eligibleJobs = filterByLocation(seniorityJobs);
   const contractJobs = filterByContract(eligibleJobs);
-  const prioritizedJobs = prioritizeJobs(contractJobs, referenceDate);
+  // Recência: mesma regra pura do pipeline, aplicada antes da priorização.
+  const { jobs: recentJobs, metrics: recencyMetrics } = filterByRecency(
+    contractJobs,
+    { referenceDate, cutoffDays },
+  );
+  const prioritizedJobs = prioritizeJobs(recentJobs, referenceDate);
 
   // Conjuntos por identidade de objeto (os filtros preservam as referências).
   const developerSet = new Set(developerJobs);
   const senioritySet = new Set(seniorityJobs);
   const eligibleSet = new Set(eligibleJobs);
   const contractSet = new Set(contractJobs);
+  const recencySet = new Set(recentJobs);
 
   // Anúncios agrupados: chave própria → chave do representante do grupo.
   const groupedInto = new Map<string, string>();
@@ -268,7 +285,13 @@ export function buildAuditReport(
     unknown: 0,
   };
 
-  const discarded = { developer: 0, seniority: 0, location: 0, contract: 0 };
+  const discarded = {
+    developer: 0,
+    seniority: 0,
+    location: 0,
+    contract: 0,
+    recency: 0,
+  };
 
   // Uma entrada por registro único ("source:id"), incluindo os anúncios
   // agrupados por equivalência — nenhum registro original é perdido.
@@ -299,6 +322,10 @@ export function buildAuditReport(
       discardStage = "contract";
       discardReason = contractDiscardReason(job);
       discarded.contract++;
+    } else if (!recencySet.has(job)) {
+      discardStage = "recency";
+      discardReason = recencyDiscardReason(job, referenceDate, cutoffDays);
+      discarded.recency++;
     }
 
     const locationClassification = locationByJob.get(job) ?? null;
@@ -345,10 +372,11 @@ export function buildAuditReport(
     duplicates: jobs.length - identityUnique.length,
     groupedByEquivalence: identityUnique.length - uniqueJobs.length,
     discarded,
-    approved: contractJobs.length,
+    approved: recentJobs.length,
     uniqueJobs: identityUnique.length,
     locationDistribution,
     contractDistribution,
+    recencyMetrics,
     equivalentGroups: equivalentAuditGroups,
     jobs: entries,
   };
@@ -377,14 +405,15 @@ export async function writeAuditReport(
  * Executa a auditoria completa: monta o relatório e o grava em `data/audit/`.
  *
  * @param jobs Todas as vagas coletadas.
- * @param options Instante de referência e diretório de saída (injetáveis).
+ * @param options Instante de referência, limite de recência e diretório de saída
+ *   (injetáveis nos testes).
  * @returns O relatório e o caminho do arquivo gravado.
  */
 export async function runAudit(
   jobs: Job[],
-  options: { referenceDate?: Date; directory?: string } = {},
+  options: { referenceDate?: Date; directory?: string; cutoffDays?: number } = {},
 ): Promise<AuditRunResult> {
-  const report = buildAuditReport(jobs, options.referenceDate);
+  const report = buildAuditReport(jobs, options.referenceDate, options.cutoffDays);
   const filePath = await writeAuditReport(report, options.directory);
 
   return { report, filePath };
