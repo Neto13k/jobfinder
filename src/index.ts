@@ -639,16 +639,30 @@ export async function processJobs(
     analysis: JobAnalysis,
     origin: "nova" | "recuperada",
   ): void => {
-    const published = job.publishedAt
-      ? ` | publicado em ${job.publishedAt}`
-      : "";
+    // Contabiliza o desfecho UMA vez, somando análises novas e recuperadas do
+    // histórico, para que o resumo final reflita o total de decisões.
+    if (analysis.decision === "compatible") {
+      summary.compatible++;
+    } else if (analysis.decision === "incompatible") {
+      summary.incompatible++;
+    } else {
+      summary.review++;
+    }
 
-    console.log(
-      `Resultado da IA: ${job.title} (${job.company}) | fonte ${job.source}${published} | ` +
-        `origem ${origin} | ${analysis.decision} | score ${analysis.score} | ` +
-        `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus} | ` +
-        `motivo: ${analysis.reason}`,
-    );
+    // Log detalhado apenas das análises NOVAS; as recuperadas do histórico
+    // entram somente na contagem (não repetem o detalhe a cada execução).
+    if (origin === "nova") {
+      const published = job.publishedAt
+        ? ` | publicado em ${job.publishedAt}`
+        : "";
+
+      console.log(
+        `Resultado da IA: ${job.title} (${job.company}) | local ${job.location} | ` +
+          `fonte ${job.source}${published} | ${analysis.decision} | score ${analysis.score} | ` +
+          `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus} | ` +
+          `motivo: ${analysis.reason}`,
+      );
+    }
 
     const kind = classifyNotification(analysis);
 
@@ -783,17 +797,11 @@ export async function processJobs(
         continue;
       }
 
-      // Salva a nova análise imediatamente, inclusive as compatíveis.
+      // Salva a nova análise imediatamente, inclusive as compatíveis. Os
+      // desfechos (compatível/incompatível/revisão) são contabilizados em
+      // handleResolved, junto com os das análises recuperadas do histórico.
       await markJobAsAnalyzed(job, analysis);
       summary.analyzed++;
-
-      if (analysis.decision === "compatible") {
-        summary.compatible++;
-      } else if (analysis.decision === "incompatible") {
-        summary.incompatible++;
-      } else {
-        summary.review++;
-      }
 
       handleResolved(job, analysis, "nova");
     }

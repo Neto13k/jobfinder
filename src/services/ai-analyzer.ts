@@ -30,8 +30,27 @@ export interface JobAnalysis {
   contractStatus: AnalysisStatus;
 }
 
-/** Modelo Gemini já validado no projeto. */
-const MODEL = "gemini-3.5-flash-lite";
+/** Modelo Gemini padrão, já validado no projeto. */
+export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
+
+/** Variável de ambiente que sobrescreve o modelo Gemini padrão. */
+const GEMINI_MODEL_ENV = "JOBFINDER_GEMINI_MODEL";
+
+/**
+ * Resolve o modelo Gemini usado nas requisições.
+ *
+ * Usa `JOBFINDER_GEMINI_MODEL` quando definida e não vazia; caso contrário,
+ * recorre ao padrão validado ({@link DEFAULT_GEMINI_MODEL}). Sem a variável, o
+ * comportamento é idêntico ao anterior.
+ *
+ * @param raw Valor bruto do modelo (padrão: o ambiente atual).
+ */
+export function resolveGeminiModel(
+  raw: string | undefined = process.env[GEMINI_MODEL_ENV],
+): string {
+  const value = raw?.trim() ?? "";
+  return value !== "" ? value : DEFAULT_GEMINI_MODEL;
+}
 
 /** Orçamento padrão (em caracteres) da descrição enviada à IA. */
 export const DEFAULT_DESCRIPTION_BUDGET = 4000;
@@ -970,7 +989,7 @@ export async function analyzeJob(job: Job): Promise<JobAnalysis> {
   let text: string | undefined;
   try {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: resolveGeminiModel(),
       contents: buildPrompt(job),
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -1063,7 +1082,7 @@ export async function analyzeJobs(
   let text: string | undefined;
   try {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: resolveGeminiModel(),
       contents: buildBatchPrompt(jobs),
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,

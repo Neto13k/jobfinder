@@ -52,6 +52,13 @@ jobs:
       # Limite de notificações por execução (padrão 3, teto de 10): compatíveis
       # antes das de revisão manual, respeitando a ordem de prioridade.
       JOBFINDER_MAX_NOTIFICATIONS: ${{ vars.JOBFINDER_MAX_NOTIFICATIONS || '3' }}
+      # Recência: vagas publicadas há mais de N dias saem da análise (padrão 30,
+      # mínimo 1); vagas sem data ou com data inválida/futura são preservadas.
+      JOBFINDER_RECENCY_CUTOFF_DAYS: ${{ vars.JOBFINDER_RECENCY_CUTOFF_DAYS || '30' }}
+      # Fila persistente de vagas pendentes entre execuções (padrão: habilitada).
+      JOBFINDER_PENDING_JOBS_ENABLED: ${{ vars.JOBFINDER_PENDING_JOBS_ENABLED || 'true' }}
+      JOBFINDER_PENDING_JOB_TTL_DAYS: ${{ vars.JOBFINDER_PENDING_JOB_TTL_DAYS || '7' }}
+      JOBFINDER_PENDING_MAX_JOBS: ${{ vars.JOBFINDER_PENDING_MAX_JOBS || '200' }}
       # Certificado TLS público versionado no repositório.
       DATABASE_CA_CERT_PATH: ./certs/prod-ca-2021.crt
       # Segredos: nunca são impressos nos logs (mascarados pelo Actions).
@@ -62,10 +69,10 @@ jobs:
 
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
