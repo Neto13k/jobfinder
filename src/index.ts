@@ -29,7 +29,6 @@ import {
   selectIndeedBatch,
   type IndeedBatch,
 } from "./services/indeed-search-rotation.js";
-import { getStorageBackend } from "./services/storage.js";
 import type { Job } from "./types/job.js";
 
 // Envio real só quando a variável for exatamente "true"; padrão é modo de teste.
@@ -316,7 +315,6 @@ async function main() {
     console.log(`Desenvolvimento: ${developerJobs.length}`);
     console.log(`Após senioridade: ${seniorityJobs.length}`);
     console.log(`Após localização: ${eligibleJobs.length}`);
-    console.log(`Armazenamento: ${getStorageBackend()}`);
     console.log(`Limite de novas análises nesta execução: ${MAX_ANALYSES}`);
 
     const summary = await processJobs(prioritizedJobs);

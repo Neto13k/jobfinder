@@ -1,13 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { query } from "../db/postgres.js";
-import { getStorageBackend, withStorageLock } from "./storage.js";
 import type { Job } from "../types/job.js";
-
-// Histórico de vagas notificadas no modo JSON (relativo ao cwd) — ignorado pelo Git.
-const JSON_HISTORY_FILE = ["data", "notified-jobs.json"];
 
 /** Estado de entrega de uma notificação. */
 export type NotificationStatus = "pending" | "sent";
@@ -89,88 +83,6 @@ export function deduplicateJobs(jobs: Job[]): Job[] {
   });
 }
 
-/** Normaliza um item do histórico JSON, aceitando o formato legado (string). */
-function normalizeJsonEntry(value: unknown): NotifiedJobRecord | undefined {
-  // Formato legado: apenas a chave, sempre tratada como já notificada.
-  if (typeof value === "string") {
-    return value.trim() === ""
-      ? undefined
-      : { key: value, status: "sent", reservedBy: null, reservedAt: null };
-  }
-
-  if (typeof value !== "object" || value === null) {
-    return undefined;
-  }
-
-  const record = value as Record<string, unknown>;
-  if (typeof record.key !== "string" || record.key.trim() === "") {
-    return undefined;
-  }
-
-  return {
-    key: record.key,
-    status: record.status === "pending" ? "pending" : "sent",
-    reservedBy: typeof record.reservedBy === "string" ? record.reservedBy : null,
-    reservedAt: typeof record.reservedAt === "string" ? record.reservedAt : null,
-  };
-}
-
-// Lê o histórico JSON; somente arquivo inexistente conta como lista vazia.
-async function readJsonHistory(): Promise<NotifiedJobRecord[]> {
-  const file = join(process.cwd(), ...JSON_HISTORY_FILE);
-  let content: string;
-
-  try {
-    content = await readFile(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-
-    throw error;
-  }
-
-  // Arquivo existente porém vazio indica perda do histórico: não apaga nada.
-  if (content.trim() === "") {
-    throw new Error(
-      `Histórico de notificações vazio (possível perda de dados): ${file}`,
-    );
-  }
-
-  let data: unknown;
-  try {
-    data = JSON.parse(content);
-  } catch {
-    // Não sobrescreve nem apaga: apenas sinaliza o problema.
-    throw new Error(
-      `Histórico de notificações corrompido (JSON inválido): ${file}`,
-    );
-  }
-
-  if (!Array.isArray(data)) {
-    throw new Error(
-      `Histórico de notificações corrompido (formato inesperado): ${file}`,
-    );
-  }
-
-  return data.map((item) => {
-    const record = normalizeJsonEntry(item);
-    if (!record) {
-      throw new Error(
-        `Histórico de notificações corrompido (registro inválido): ${file}`,
-      );
-    }
-    return record;
-  });
-}
-
-// Grava o histórico JSON, criando a pasta quando necessário.
-async function writeJsonHistory(records: NotifiedJobRecord[]): Promise<void> {
-  const file = join(process.cwd(), ...JSON_HISTORY_FILE);
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(records, null, 2)}\n`, "utf8");
-}
-
 /**
  * Indica se a vaga já possui reserva ou notificação registrada.
  *
@@ -182,17 +94,11 @@ async function writeJsonHistory(records: NotifiedJobRecord[]): Promise<void> {
  */
 export async function isJobNotified(job: Job): Promise<boolean> {
   const key = generateJobKey(job);
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      "select 1 from public.notified_jobs where key = $1 limit 1",
-      [key],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  const records = await readJsonHistory();
-  return records.some((record) => record.key === key);
+  const { rowCount } = await query(
+    "select 1 from public.notified_jobs where key = $1 limit 1",
+    [key],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
@@ -204,41 +110,21 @@ export async function isJobNotified(job: Job): Promise<boolean> {
  *
  * @param job Vaga a reservar.
  * @returns A reserva obtida ou undefined se a vaga já estava reservada/notificada.
- * @throws Error se o backend de persistência estiver indisponível.
+ * @throws Error se o PostgreSQL estiver indisponível.
  */
 export async function reserveJobNotification(
   job: Job,
 ): Promise<NotificationReservation | undefined> {
   const key = generateJobKey(job);
   const token = randomUUID();
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `insert into public.notified_jobs (key, status, reserved_by, reserved_at)
-       values ($1, 'pending', $2, now())
-       on conflict (key) do nothing
-       returning key`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0 ? { key, token } : undefined;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-
-    if (records.some((record) => record.key === key)) {
-      return undefined;
-    }
-
-    records.push({
-      key,
-      status: "pending",
-      reservedBy: token,
-      reservedAt: new Date().toISOString(),
-    });
-    await writeJsonHistory(records);
-    return { key, token };
-  });
+  const { rowCount } = await query(
+    `insert into public.notified_jobs (key, status, reserved_by, reserved_at)
+     values ($1, 'pending', $2, now())
+     on conflict (key) do nothing
+     returning key`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0 ? { key, token } : undefined;
 }
 
 /**
@@ -254,30 +140,13 @@ export async function confirmJobNotification(
   reservation: NotificationReservation,
 ): Promise<boolean> {
   const { key, token } = reservation;
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `update public.notified_jobs
-          set status = 'sent', notified_at = now()
-        where key = $1 and status = 'pending' and reserved_by = $2`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find((item) => item.key === key);
-
-    if (!record || record.status !== "pending" || record.reservedBy !== token) {
-      return false;
-    }
-
-    record.status = "sent";
-    record.reservedBy = null;
-    await writeJsonHistory(records);
-    return true;
-  });
+  const { rowCount } = await query(
+    `update public.notified_jobs
+        set status = 'sent', notified_at = now()
+      where key = $1 and status = 'pending' and reserved_by = $2`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
@@ -293,33 +162,18 @@ export async function releaseJobNotification(
   reservation: NotificationReservation,
 ): Promise<boolean> {
   const { key, token } = reservation;
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `delete from public.notified_jobs
-        where key = $1 and status = 'pending' and reserved_by = $2`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find((item) => item.key === key);
-
-    if (!record || record.status !== "pending" || record.reservedBy !== token) {
-      return false;
-    }
-
-    await writeJsonHistory(records.filter((item) => item.key !== key));
-    return true;
-  });
+  const { rowCount } = await query(
+    `delete from public.notified_jobs
+      where key = $1 and status = 'pending' and reserved_by = $2`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
  * Registra a vaga como notificada (reserva + confirmação).
  *
- * Atalho para scripts e testes; o pipeline principal usa reserveJobNotification
+ * Atalho para scripts; o pipeline principal usa reserveJobNotification
  * e confirmJobNotification para tratar falhas de envio.
  *
  * @param job Vaga a registrar.
@@ -347,34 +201,20 @@ export async function listPendingReservations(
   olderThanMs = 0,
 ): Promise<PendingReservation[]> {
   const cutoff = Date.now() - olderThanMs;
+  const { rows } = await query<NotifiedJobRow>(
+    `select key, status, reserved_by, reserved_at
+       from public.notified_jobs
+      where status = 'pending'
+      order by reserved_at asc nulls first`,
+  );
 
-  let pending: PendingReservation[];
+  const pending = rows.map((row) => ({
+    key: row.key,
+    reservedBy: row.reserved_by,
+    reservedAt: row.reserved_at ? new Date(row.reserved_at).toISOString() : null,
+  }));
 
-  if (getStorageBackend() === "postgres") {
-    const { rows } = await query<NotifiedJobRow>(
-      `select key, status, reserved_by, reserved_at
-         from public.notified_jobs
-        where status = 'pending'
-        order by reserved_at asc nulls first`,
-    );
-
-    pending = rows.map((row) => ({
-      key: row.key,
-      reservedBy: row.reserved_by,
-      reservedAt: row.reserved_at ? new Date(row.reserved_at).toISOString() : null,
-    }));
-  } else {
-    const records = await readJsonHistory();
-    pending = records
-      .filter((record) => record.status === "pending")
-      .map((record) => ({
-        key: record.key,
-        reservedBy: record.reservedBy,
-        reservedAt: record.reservedAt,
-      }));
-  }
-
-  // Reservas sem timestamp são mantidas: a idade é desconhecida, não nula.
+  // Sem timestamp a idade é desconhecida: a reserva continua na lista.
   return pending.filter(
     (item) => !item.reservedAt || Date.parse(item.reservedAt) <= cutoff,
   );
@@ -394,42 +234,19 @@ export async function resolvePendingReservation(
   key: string,
   resolution: PendingResolution,
 ): Promise<boolean> {
-  if (getStorageBackend() === "postgres") {
-    if (resolution === "sent") {
-      const { rowCount } = await query(
-        `update public.notified_jobs
-            set status = 'sent', notified_at = now()
-          where key = $1 and status = 'pending'`,
-        [key],
-      );
-      return (rowCount ?? 0) > 0;
-    }
-
+  if (resolution === "sent") {
     const { rowCount } = await query(
-      "delete from public.notified_jobs where key = $1 and status = 'pending'",
+      `update public.notified_jobs
+          set status = 'sent', notified_at = now()
+        where key = $1 and status = 'pending'`,
       [key],
     );
     return (rowCount ?? 0) > 0;
   }
 
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find(
-      (item) => item.key === key && item.status === "pending",
-    );
-
-    if (!record) {
-      return false;
-    }
-
-    if (resolution === "sent") {
-      record.status = "sent";
-      record.reservedBy = null;
-      await writeJsonHistory(records);
-    } else {
-      await writeJsonHistory(records.filter((item) => item.key !== key));
-    }
-
-    return true;
-  });
+  const { rowCount } = await query(
+    "delete from public.notified_jobs where key = $1 and status = 'pending'",
+    [key],
+  );
+  return (rowCount ?? 0) > 0;
 }

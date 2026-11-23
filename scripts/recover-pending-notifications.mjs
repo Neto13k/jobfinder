@@ -13,7 +13,7 @@
 //   --mark-sent  confirma a entrega (a mensagem foi recebida);
 //   --release    libera a vaga (é seguro tentar novamente).
 //
-// Respeita JOBFINDER_STORAGE (json ou postgres).
+// A persistência é sempre o PostgreSQL (DATABASE_URL).
 
 import process from "node:process";
 

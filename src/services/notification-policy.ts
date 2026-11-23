@@ -12,7 +12,13 @@ export type NotificationKind = "compatible" | "manual_review" | null;
 /**
  * Classifica se uma análise deve gerar notificação e de qual tipo.
  *
- * Função pura: sem chamadas externas ou alterações em arquivos.
+ * Função pura: sem chamadas externas.
+ *
+ * Só dois casos geram alerta. `review` com localização e contratação
+ * `allowed` devolve null de propósito: a dúvida da IA não é sobre o tipo de
+ * contrato (já conhecido), e o aviso de revisão existe apenas quando a
+ * localização é permitida e a contratação continua indefinida. Localização ou
+ * contratação `blocked`/`unknown` fora desse par também não notifica.
  *
  * @param analysis Resultado estruturado da análise da vaga.
  * @returns "compatible" para vagas aprovadas, "manual_review" quando a
@@ -22,7 +28,6 @@ export type NotificationKind = "compatible" | "manual_review" | null;
 export function classifyNotification(
   analysis: JobAnalysis,
 ): NotificationKind {
-  // Aprovada: localização e contratação explicitamente permitidas.
   if (
     analysis.decision === "compatible" &&
     analysis.locationStatus === "allowed" &&
@@ -31,7 +36,6 @@ export function classifyNotification(
     return "compatible";
   }
 
-  // Revisão manual: localização ok, mas contratação ainda indefinida.
   if (
     analysis.decision === "review" &&
     analysis.locationStatus === "allowed" &&

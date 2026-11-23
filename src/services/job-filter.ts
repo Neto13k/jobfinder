@@ -3,7 +3,6 @@ import type { Job } from "../types/job.js";
 /** Termos que indicam cargo de desenvolvimento de software. */
 const DEVELOPER_KEYWORDS = [
   "software engineer",
-  "software engineering",
   "software development",
   "developer",
   "frontend",
@@ -15,7 +14,6 @@ const DEVELOPER_KEYWORDS = [
   "web development",
   "react",
   "desenvolvedor",
-  "desenvolvedora",
   "desenvolvimento de software",
   "desenvolvimento web",
   "desenvolvimento de sistemas",
@@ -23,7 +21,6 @@ const DEVELOPER_KEYWORDS = [
   "engenheira de software",
   "engenharia de software",
   "programador",
-  "programadora",
 ];
 
 /** Termos que indicam cargos fora de desenvolvimento. */

@@ -1,9 +1,10 @@
-// Smoke test de integração do JobFinder MVP 1.0.
+// Smoke test de integração do JobFinder.
 //
 // Uso:    npx tsx scripts/smoke-test.mjs
 // Envio real ao Telegram somente com JOBFINDER_SMOKE_SEND=true.
 //
-// O teste roda em um diretório temporário, sem tocar no histórico real do projeto.
+// A persistência é o PostgreSQL real (DATABASE_URL). O diretório temporário
+// não isola mais análises nem notificações.
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,10 +38,8 @@ const originalCwd = process.cwd();
 const tempDir = await mkdtemp(join(tmpdir(), "jobfinder-smoke-"));
 
 try {
-  // O diretório temporário precisa virar o cwd ANTES de importar os serviços que
-  // calculam o caminho do histórico com process.cwd().
   process.chdir(tempDir);
-  console.log(`Histórico temporário: ${tempDir}`);
+  console.log(`Diretório temporário (não isola o PostgreSQL): ${tempDir}`);
 
   const { deduplicateJobs, isJobNotified, markJobAsNotified } = await import(
     "../dist/services/deduplication.js"
@@ -80,14 +79,14 @@ try {
     "filterByLocation rejeitou a vaga de teste.",
   );
 
-  // 2) O histórico temporário começa vazio.
+  // 2) Consulta o histórico no PostgreSQL.
   assert(
     (await isJobNotified(testJob)) === false,
-    "A vaga não deveria estar notificada no histórico temporário.",
+    "A vaga não deveria estar notificada.",
   );
   assert(
     (await getAnalyzedJob(testJob)) === undefined,
-    "O histórico temporário de análises deveria começar vazio.",
+    "A vaga não deveria ter análise salva.",
   );
 
   // 3) Consulta única ao Gemini e validação da resposta (sem forçar decisão).
@@ -107,12 +106,12 @@ try {
       `localização ${analysis.locationStatus} | contratação ${analysis.contractStatus}`,
   );
 
-  // 4) Persistência e recuperação da análise no histórico temporário.
+  // 4) Persistência e recuperação da análise no PostgreSQL.
   await markJobAsAnalyzed(testJob, analysis);
   const savedAnalysis = await getAnalyzedJob(testJob);
   assert(
     savedAnalysis !== undefined,
-    "Análise não foi recuperada do histórico temporário.",
+    "Análise não foi recuperada do histórico.",
   );
   assert(
     savedAnalysis.decision === analysis.decision &&
@@ -142,7 +141,7 @@ try {
       (await isJobNotified(testJob)) === true,
       "A vaga deveria constar como notificada após o envio.",
     );
-    console.log("Envio confirmado e vaga registrada no histórico temporário.");
+    console.log("Envio confirmado e vaga registrada no histórico.");
     console.log("Verificação: a mesma vaga não seria enviada novamente.");
   }
 

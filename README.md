@@ -4,7 +4,7 @@
 
 O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadros públicos de empresas e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, utiliza o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
-> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`), mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. As informações de análise e notificações podem ser guardadas em **arquivos JSON locais** ou nas **tabelas do Supabase**, conforme configuração. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
+> **Escopo desta versão:** a v2.0 amplia a coleta multi-fonte com **LinkedIn Jobs** e **Indeed Jobs** (via `ts-jobspy@3.0.1`), mantendo a execução **manual** e **agendada pelo GitHub Actions**, a **persistência no PostgreSQL (Supabase)** e o envio opcional de alertas. Ela continua **não** realizando candidaturas e **não** oferecendo interface de frontend. Análises e notificações ficam nas **tabelas do Supabase**. **Publicações de recrutadores (LinkedIn Posts) não fazem parte da v2.0** — estão planejadas para a v2.1.
 
 ## Novidades da v2.0
 
@@ -17,13 +17,12 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 
 ### Recursos herdados da v1.1 (mantidos)
 
-- **Persistência no PostgreSQL (Supabase):** históricos de análises e de notificações podem viver em `public.analyzed_jobs` e `public.notified_jobs`, com consultas e gravações parametrizadas.
-- **Seleção explícita de armazenamento:** `JOBFINDER_STORAGE` escolhe entre `json` (padrão) e `postgres`, **sem fallback silencioso** — falhas do banco interrompem a execução.
+- **Persistência no PostgreSQL (Supabase):** históricos de análises e de notificações ficam em `public.analyzed_jobs` e `public.notified_jobs`, com consultas e gravações parametrizadas. Falha do banco interrompe a execução.
 - **Controle de duplicações:** reserva da vaga antes do envio, com estados de entrega (`pending`/`sent`) e **propriedade da reserva** (`reserved_by`/`reserved_at`).
 - **Automação controlada com GitHub Actions:** execução agendada **a cada hora, aos 17 minutos (`cron: "17 * * * *"`), em UTC**, **desativada por padrão** (`JOBFINDER_AUTOMATION_ENABLED=false`), execução manual (`workflow_dispatch`) e controle de concorrência.
 - **Script de migração dos históricos:** importa os JSON existentes para o PostgreSQL com modo de simulação e importação idempotente.
 - **Correção do filtro de estágios:** vagas como *Estágio em Desenvolvimento de Software* deixam de ser descartadas, mantendo o reconhecimento de desenvolvimento júnior/estágio em português e inglês.
-- **Testes automatizados:** filtros, persistência, deduplicação, concorrência e tratamento de falhas (`npm test`).
+- **Validação:** `npm test` compila o projeto e executa `scripts/smoke-test.mjs` (chamadas externas reais; exige credenciais).
 
 ## Funcionalidades incluídas
 
@@ -33,7 +32,7 @@ O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de quadro
 - Filtros de cargo (desenvolvimento), senioridade (exclui sênior/pleno/lead), localização e **contratação** (CLT ou estágio; PJ não é apresentado como aprovado).
 - Priorização geográfica das vagas, sem excluir oportunidades apenas por terem prioridade baixa.
 - Análise de **no máximo uma nova vaga por execução** na configuração atual (valor padrão de `JOBFINDER_MAX_ANALYSES`, ajustável de `1` a `5`), por meio do Gemini, reaproveitando análises salvas.
-- Persistência em **arquivo JSON** ou **PostgreSQL**, com seleção explícita por variável de ambiente.
+- Persistência no **PostgreSQL (Supabase)**.
 - **Reserva de notificação** antes do envio, com recuperação manual de reservas pendentes, evitando duplicidade.
 - Notificações de vagas aprovadas via Telegram, quando habilitadas.
 - Alertas opcionais de **revisão manual** para vagas com localização permitida e contratação não informada, sem apresentá-las como confirmadas.
@@ -52,7 +51,6 @@ O JobFinder **não** envia currículos, não se candidata a vagas e não confirm
 - Telegram Bot API
 - PostgreSQL no Supabase (`pg`), com TLS validado
 - GitHub Actions para agendamento
-- Arquivos JSON locais como alternativa de histórico
 
 ## Requisitos
 
@@ -60,7 +58,7 @@ O JobFinder **não** envia currículos, não se candidata a vagas e não confirm
 - **npm** e acesso à internet para coleta, Gemini e Telegram.
 - Chave da **Gemini API** para análises.
 - Para notificações: bot do Telegram, token e identificador do chat de destino.
-- Para persistência na nuvem: projeto **Supabase** e a `DATABASE_URL`.
+- Projeto **Supabase** e a `DATABASE_URL` para o histórico de análises e notificações.
 
 ## Instalação e configuração
 
@@ -82,14 +80,12 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `GEMINI_API_KEY` | Chave para a Gemini API | Obrigatória para analisar |
 | `TELEGRAM_BOT_TOKEN` | Token do bot | Necessário para enviar mensagens |
 | `TELEGRAM_CHAT_ID` | Chat de destino | Necessário para enviar mensagens |
-| `JOBFINDER_STORAGE` | Backend de histórico: `json` ou `postgres` | `json` |
 | `JOBFINDER_MAX_ANALYSES` | Número máximo de novas análises por execução | `1` (teto de `5`) |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
 | `JOBFINDER_AUTOMATION_ENABLED` | Habilita o job **agendado** do GitHub Actions | `false` |
-| `DATABASE_URL` | Conexão PostgreSQL do Supabase | Obrigatória no modo `postgres` |
+| `DATABASE_URL` | Conexão PostgreSQL do Supabase | Obrigatória |
 | `DATABASE_CA_CERT_PATH` | Caminho do certificado CA do Supabase | `./certs/prod-ca-2021.crt` |
-| `JOBFINDER_RUN_DB_TESTS` | Autoriza testes que gravam no banco | `false` |
 
 O valor `true` deve ser escrito exatamente assim. Para ativar alertas de revisão manual, **as duas variáveis de envio** precisam ser `true`.
 
@@ -114,18 +110,15 @@ As pesquisas do LinkedIn e do Indeed são configuradas em `src/config/linkedin-s
 - **Modalidade:** a modalidade é inferida dos sinais do próprio anúncio (título, localização e descrição), considerando termos em português, e não apenas o filtro de busca.
 - **Falhas isoladas:** o desfecho de cada coleta (`ok`, `empty`, `partial`, `error`) é tratado explicitamente. Em `error`, a fonte falha isoladamente; em `partial`, as vagas já coletadas são preservadas e a interrupção é registrada. A falha de um provider não interrompe a execução.
 
-## Persistência: JSON ou PostgreSQL
+## Persistência no PostgreSQL
 
-O backend é escolhido por `JOBFINDER_STORAGE`:
+Os históricos ficam em `public.analyzed_jobs` e `public.notified_jobs` do Supabase, identificados pela chave `source:id`.
 
-- **`json` (padrão):** históricos em `data/analyzed-jobs.json` e `data/notified-jobs.json`. Ideal para uso local. Não há sincronização entre máquinas.
-- **`postgres`:** históricos em `public.analyzed_jobs` e `public.notified_jobs` do Supabase, identificados pela mesma chave `source:id`.
-
-Regras importantes do modo `postgres`:
-
-- **Sem fallback silencioso:** se o banco falhar, a execução falha com erro. O JobFinder **não** cai para JSON automaticamente.
+- **Sem fallback:** se o banco falhar, a execução falha com erro.
 - **Sem envio sem estado de deduplicação:** a vaga é **reservada no banco antes do envio**. Se a reserva não puder ser feita, nenhuma notificação é enviada.
 - **TLS validado:** a conexão exige validação do certificado do servidor. O certificado público do Supabase já está em `certs/prod-ca-2021.crt`; parâmetros de SSL na `DATABASE_URL` (como `sslmode`) são ignorados para não sobrepor essa validação.
+
+Arquivos JSON em `data/` não fazem mais parte do pipeline. O script `scripts/migrate-json-to-postgres.mjs` continua disponível para importar um histórico local antigo, se ainda existir.
 
 ### Segurança das notificações
 
@@ -198,7 +191,7 @@ node --env-file=.env scripts/recover-pending-notifications.mjs --mark-sent="sour
 node --env-file=.env scripts/recover-pending-notifications.mjs --release="source:id"
 ```
 
-O script apenas lê, confirma (`sent`) ou libera (`released`) reservas existentes; ele **não** envia mensagens. Respeita `JOBFINDER_STORAGE` (`json` ou `postgres`).
+O script apenas lê, confirma (`sent`) ou libera (`released`) reservas existentes no PostgreSQL; ele **não** envia mensagens.
 
 ## Como executar
 
@@ -211,7 +204,7 @@ npm run build
 **2. Execução manual em modo seguro (sem mensagens), com PostgreSQL:**
 
 ```bash
-JOBFINDER_STORAGE=postgres JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
+JOBFINDER_SEND_NOTIFICATIONS=false node --env-file=.env dist/index.js
 ```
 
 **3. Analisar até três vagas novas, ainda sem enviar mensagens:**
@@ -237,7 +230,7 @@ O workflow `.github/workflows/jobfinder.yml` executa o JobFinder automaticamente
 - **Execução manual:** pela aba **Actions** do GitHub (`workflow_dispatch`), sempre permitida para disparo controlado.
 - **Concorrência:** `concurrency: jobfinder` evita execuções simultâneas.
 - **Permissões mínimas:** `contents: read` e `timeout-minutes: 10`.
-- **Persistência:** `JOBFINDER_STORAGE=postgres`; não usa arquivos JSON locais.
+- **Persistência:** PostgreSQL via `DATABASE_URL`. O workflow ainda define `JOBFINDER_STORAGE=postgres`; o código não lê mais essa variável.
 - **TLS:** usa o certificado versionado `certs/prod-ca-2021.crt` via `DATABASE_CA_CERT_PATH`.
 - **Envios desativados por padrão:** só enviam se as variáveis do repositório forem definidas como `true`.
 - **Sem envio sem vagas elegíveis:** se nenhuma vaga passar pelos filtros e pela análise (ou se todas já estiverem notificadas), a execução termina **sem enviar nenhuma mensagem**.
@@ -301,7 +294,7 @@ Fontes (Greenhouse, Lever, Ashby, LinkedIn Jobs, Indeed Jobs)
            Prioridade geográfica
                   |
                   v
-   Histórico: vaga já analisada? (JSON ou PostgreSQL)
+   Histórico: vaga já analisada? (PostgreSQL)
            |                 |
           Sim               Não
            |                 |
@@ -353,23 +346,16 @@ Essas fontes foram usadas para validar os providers e **não garantem oportunida
 # Build (TypeScript em modo estrito/ESM)
 npm run build
 
-# Filtros, persistência JSON, deduplicação, concorrência e falhas de despacho
+# Compila e roda o smoke test (Gemini, PostgreSQL e, se habilitado, Telegram)
 npm test
-
-# Testes que gravam no PostgreSQL (opt-in; usa chaves de teste e limpa ao final)
-JOBFINDER_RUN_DB_TESTS=true npm run test:db
 ```
 
-`npm test` cobre: filtros de cargo/senioridade/localização, política de notificação, persistência JSON com reserva e propriedade (`reserved_by`), e o despacho de notificações (falha na confirmação após envio aceito, envio confirmadamente não entregue, resultado incerto sem reenvio, e recuperação de reserva pendente).
-
-Os testes de banco **não** são executados por `npm test`: exigem `DATABASE_URL` e `JOBFINDER_RUN_DB_TESTS=true` e só rodam quando você autoriza explicitamente. Eles usam o prefixo `db-test:` e removem suas linhas ao final; sem as variáveis, apenas informam e não tocam no Supabase.
+`npm test` executa `scripts/smoke-test.mjs` depois do build. Esse roteiro faz chamadas externas reais: análise no Gemini, leitura e gravação no PostgreSQL e, somente com `JOBFINDER_SMOKE_SEND=true`, envio ao Telegram. Ele **não** isola o histórico.
 
 **Resultados das validações realizadas:**
 
 - **Build:** o projeto compila com `npm run build` (TypeScript em modo estrito, ESM/NodeNext), sem erros de tipo.
-- **Testes automatizados:** `npm test` valida a lógica interna de filtros, deduplicação, persistência JSON com reserva e propriedade, e os desfechos do despacho de notificações.
-- **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita, em um diretório temporário, o fluxo de deduplicação → filtros → análise → persistência → (envio opcional), sem tocar nos históricos reais.
-- **Validação do provider:** `scripts/validate-linkedin.mjs` executa **apenas** `fetchLinkedInJobs`, sem Gemini, Supabase ou Telegram, para inspeção manual da coleta.
+- **Roteiro de fumaça:** `scripts/smoke-test.mjs` exercita deduplicação → filtros → análise → persistência no PostgreSQL → (envio opcional).
 
 > **Importante:** essas validações são **isoladas** e verificam a **lógica interna** do projeto. Elas **não** garantem o funcionamento integral em produção: a coleta real depende de `ts-jobspy` e de serviços de terceiros (sujeitos a mudanças de layout, bloqueios, limites e termos de uso), e as integrações com Gemini, Telegram e Supabase dependem de credenciais, cotas e conectividade. A cobertura completa das 200 pesquisas ocorre ao longo de 20 execuções e não é exercitada de uma só vez.
 
@@ -396,9 +382,8 @@ jobfinder/
 │   │   └── indeed.ts                  # Indeed Jobs via ts-jobspy
 │   ├── services/
 │   │   ├── ai-analyzer.ts
-│   │   ├── analysis-history.ts        # Histórico de análises (JSON ou PostgreSQL)
+│   │   ├── analysis-history.ts        # Histórico de análises (PostgreSQL)
 │   │   ├── deduplication.ts           # Chave, reserva e histórico de notificações
-│   │   ├── storage.ts                 # Seleção do backend de persistência
 │   │   ├── job-filter.ts
 │   │   ├── seniority-filter.ts
 │   │   ├── location-filter.ts
@@ -411,8 +396,7 @@ jobfinder/
 │   ├── types/job.ts
 │   └── index.ts
 ├── supabase/migrations/               # Migrations SQL
-├── scripts/                           # Testes e utilitários manuais
-├── data/                              # Históricos JSON locais (não versionar)
+├── scripts/                           # Smoke tests, migração e diagnóstico
 ├── .env.example                       # Referência de configuração, sem segredos
 ├── package.json
 └── tsconfig.json
@@ -423,7 +407,7 @@ jobfinder/
 ## Segurança e boas práticas
 
 1. Não colocar chaves, tokens ou `TELEGRAM_CHAT_ID` real em arquivos versionados.
-2. Conferir que `.env` e os históricos locais não estão sendo rastreados pelo Git.
+2. Conferir que `.env` não está sendo rastreado pelo Git.
 3. Iniciar com `JOBFINDER_SEND_NOTIFICATIONS=false`; ativar envios conscientemente.
 4. Manter `JOBFINDER_AUTOMATION_ENABLED=false` até validar o fluxo; a execução manual (`workflow_dispatch`) permite testar sem habilitar o agendamento.
 5. Manter a validação TLS; nunca usar `rejectUnauthorized: false`.
@@ -433,7 +417,6 @@ jobfinder/
 ## Limitações conhecidas da v2.0
 
 - **Não há garantia de entrega exatamente uma vez:** o Telegram e o banco não compartilham transação. A reserva antes do envio reduz duplicidades em condições normais, mas não elimina a possibilidade de envio perdido ou de reserva `pending` após uma falha entre o envio e a confirmação. Essas reservas **não** são reenviadas automaticamente e exigem resolução manual (ver *Recuperação de reservas pendentes*).
-- **Persistência JSON não é compartilhada:** no modo `json`, os históricos ficam apenas na máquina local; o GitHub Actions usa `postgres`.
 - **Atraso do agendamento:** execuções do GitHub Actions podem ocorrer com atraso e não em tempo real.
 - **Cobertura por execução:** apenas 5 pesquisas do LinkedIn e 5 do Indeed rodam por execução; a cobertura completa das 200 pesquisas depende do ciclo de 20 horas. As pesquisas **não** são executadas simultaneamente.
 - **Dependência de scraping:** a coleta das vagas do LinkedIn e do Indeed depende da `ts-jobspy@3.0.1` e do patch local (`geoId`); mudanças nas plataformas ou atualizações da biblioteca podem exigir ajustes. A versão fica fixada exatamente para preservar a compatibilidade do patch.
