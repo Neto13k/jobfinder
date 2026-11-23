@@ -33,32 +33,11 @@ jobs:
       NODE_ENV: production
       # Persistência na nuvem: nunca usar arquivos JSON locais no Actions.
       JOBFINDER_STORAGE: postgres
-      # Limite base de novas análises por execução; PISO do limite efetivo, que é
-      # ampliado pelo orçamento de requisições da cota (padrão 5, teto de 10).
-      JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '5' }}
-      # Vagas por requisição ao Gemini (padrão 5, teto de 10); independente do limite acima.
-      JOBFINDER_ANALYSIS_BATCH_SIZE: ${{ vars.JOBFINDER_ANALYSIS_BATCH_SIZE || '5' }}
-      # Cota gratuita diária do Gemini e distribuição entre as execuções (cron horário).
-      JOBFINDER_GEMINI_DAILY_QUOTA: ${{ vars.JOBFINDER_GEMINI_DAILY_QUOTA || '450' }}
-      JOBFINDER_GEMINI_EXECUTIONS_PER_DAY: ${{ vars.JOBFINDER_GEMINI_EXECUTIONS_PER_DAY || '24' }}
-      # Intervalo mínimo entre requisições (ms), tokens de entrada por minuto (TPM)
-      # e orçamento de tempo da análise (ms, contado desde o início do pipeline).
-      JOBFINDER_GEMINI_MIN_INTERVAL_MS: ${{ vars.JOBFINDER_GEMINI_MIN_INTERVAL_MS || '6000' }}
-      JOBFINDER_GEMINI_TPM_LIMIT: ${{ vars.JOBFINDER_GEMINI_TPM_LIMIT || '250000' }}
-      JOBFINDER_GEMINI_TIME_BUDGET_MS: ${{ vars.JOBFINDER_GEMINI_TIME_BUDGET_MS || '480000' }}
+      # Limite de novas análises por execução (respeita a cota gratuita do Gemini).
+      JOBFINDER_MAX_ANALYSES: ${{ vars.JOBFINDER_MAX_ANALYSES || '1' }}
       # Envios desativados por padrão; ativar via variável do repositório.
       JOBFINDER_SEND_NOTIFICATIONS: ${{ vars.JOBFINDER_SEND_NOTIFICATIONS || 'false' }}
       JOBFINDER_SEND_REVIEWS: ${{ vars.JOBFINDER_SEND_REVIEWS || 'false' }}
-      # Limite de notificações por execução (padrão 3, teto de 10): compatíveis
-      # antes das de revisão manual, respeitando a ordem de prioridade.
-      JOBFINDER_MAX_NOTIFICATIONS: ${{ vars.JOBFINDER_MAX_NOTIFICATIONS || '3' }}
-      # Recência: vagas publicadas há mais de N dias saem da análise (padrão 30,
-      # mínimo 1); vagas sem data ou com data inválida/futura são preservadas.
-      JOBFINDER_RECENCY_CUTOFF_DAYS: ${{ vars.JOBFINDER_RECENCY_CUTOFF_DAYS || '30' }}
-      # Fila persistente de vagas pendentes entre execuções (padrão: habilitada).
-      JOBFINDER_PENDING_JOBS_ENABLED: ${{ vars.JOBFINDER_PENDING_JOBS_ENABLED || 'true' }}
-      JOBFINDER_PENDING_JOB_TTL_DAYS: ${{ vars.JOBFINDER_PENDING_JOB_TTL_DAYS || '7' }}
-      JOBFINDER_PENDING_MAX_JOBS: ${{ vars.JOBFINDER_PENDING_MAX_JOBS || '200' }}
       # Certificado TLS público versionado no repositório.
       DATABASE_CA_CERT_PATH: ./certs/prod-ca-2021.crt
       # Segredos: nunca são impressos nos logs (mascarados pelo Actions).
@@ -69,10 +48,10 @@ jobs:
 
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Configurar Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm

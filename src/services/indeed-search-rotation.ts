@@ -5,7 +5,7 @@ import {
 import type { IndeedJobSource } from "../config/indeed-searches.js";
 
 /** Total de lotes distintos; define o ciclo da rotação. */
-export const INDEED_TOTAL_BATCHES = 22;
+export const INDEED_TOTAL_BATCHES = 20;
 
 /** Pesquisas remotas por lote; as demais posições do lote são a pesquisa local. */
 export const INDEED_REMOTES_PER_BATCH = 4;
@@ -25,14 +25,14 @@ export interface IndeedBatch {
   searches: IndeedJobSource[];
 }
 
-// A rotação só é válida com exatamente 22 locais e 88 remotas (22 lotes de 5).
+// A rotação só é válida com exatamente 20 locais e 80 remotas (20 lotes de 5).
 if (
   INDEED_LOCAL_SEARCHES.length !== INDEED_TOTAL_BATCHES ||
   INDEED_REMOTE_SEARCHES.length !==
     INDEED_TOTAL_BATCHES * INDEED_REMOTES_PER_BATCH
 ) {
   throw new Error(
-    "Matriz de pesquisas do Indeed inválida: esperado 22 locais e 88 remotas, " +
+    "Matriz de pesquisas do Indeed inválida: esperado 20 locais e 80 remotas, " +
       `recebido ${INDEED_LOCAL_SEARCHES.length} e ${INDEED_REMOTE_SEARCHES.length}.`,
   );
 }
@@ -43,7 +43,7 @@ if (
  * Determinístico e sem estado: converte a data em horas UTC absolutas desde a
  * época (epoch ÷ 1 h) e aplica módulo {@link INDEED_TOTAL_BATCHES}, de modo que
  * cada hora do calendário mapeie sempre para o mesmo lote e o ciclo se repita a
- * cada 22 horas. Execuções na mesma hora repetem o mesmo lote e nada precisa
+ * cada 20 horas. Execuções na mesma hora repetem o mesmo lote e nada precisa
  * ser persistido entre execuções. A rotação é independente da do LinkedIn.
  *
  * @param date Data de referência (padrão: agora). Recebida como parâmetro para

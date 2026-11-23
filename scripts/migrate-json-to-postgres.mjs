@@ -83,21 +83,6 @@ function assertAnalyzedRecord(record) {
   }
 }
 
-const ANALYZED_STATUSES = new Set(["allowed", "blocked", "unknown"]);
-
-/**
- * Normaliza um status de critério importado do JSON.
- *
- * Registros legados (anteriores à TASK-05) não possuem seniorityStatus nem
- * technologiesStatus; nesse caso — ou diante de valor inesperado — assume
- * "unknown", preservando a classificação conservadora exigida pela revisão.
- */
-function normalizeAnalyzedStatus(value) {
-  return typeof value === "string" && ANALYZED_STATUSES.has(value)
-    ? value
-    : "unknown";
-}
-
 async function migrateAnalyzed(records) {
   // Valida TODOS os registros antes de qualquer gravação — inclusive no dry-run.
   for (const record of records) {
@@ -115,25 +100,18 @@ async function migrateAnalyzed(records) {
   for (const record of records) {
     const { rowCount } = await query(
       `insert into public.analyzed_jobs
-         (key, decision, score, reason, seniority_status, technologies_status,
-          location_status, contract_status, analyzed_at, criteria_version)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       on conflict (key, criteria_version) do nothing
+         (key, decision, score, reason, location_status, contract_status, analyzed_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (key) do nothing
        returning key`,
       [
         String(record.key),
         String(record.decision),
         Number(record.score),
         String(record.reason),
-        normalizeAnalyzedStatus(record.seniorityStatus),
-        normalizeAnalyzedStatus(record.technologiesStatus),
         String(record.locationStatus),
         String(record.contractStatus),
         new Date(record.analyzedAt).toISOString(),
-        // Preserva a versão quando existir; registros legados ficam nulos.
-        typeof record.criteriaVersion === "string"
-          ? record.criteriaVersion
-          : null,
       ],
     );
 

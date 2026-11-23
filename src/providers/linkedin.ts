@@ -1,12 +1,7 @@
 import { scrapeJobs, type Job as ScrapedJob, type ScrapeOptions, type SiteName } from "ts-jobspy";
 
 import { classifyJobModality } from "../services/location-filter.js";
-import {
-  toRateLimitError,
-  withRateLimitGuard,
-} from "../services/rate-limit.js";
 import type { Job } from "../types/job.js";
-import { toStringList, toWorkplaceType } from "./normalize.js";
 
 /** Origem das vagas. */
 const SOURCE = "linkedin";
@@ -51,9 +46,6 @@ export interface LinkedInSearchParams {
  * @returns Vagas normalizadas, com ID estável, descrição completa, URL e localização originais.
  * @throws {Error} Se o termo de busca estiver vazio, se faltarem os metadados do
  * LinkedIn ou se a coleta terminar em `error`.
- * @throws {RateLimitError} Se a coleta indicar rate limiting (HTTP 429); o erro
- * carrega as vagas já coletadas (vazio em `error`, preservadas em `partial`).
- * Uma rejeição direta da promessa de coleta também é convertida nesse erro.
  */
 export async function fetchLinkedInJobs(
   params: LinkedInSearchParams,
@@ -98,10 +90,7 @@ export async function fetchLinkedInJobs(
     options.resultsWanted = params.resultsWanted;
   }
 
-  // Converte uma eventual rejeição direta da coleta (ex.: `RateLimitException`
-  // escapando da biblioteca) em `RateLimitError`; os demais erros são
-  // repropagados sem alteração.
-  const result = await withRateLimitGuard(() => scrapeJobs(options), SOURCE);
+  const result = await scrapeJobs(options);
 
   const siteMeta = result.meta.sites.find((entry) => entry.site === SITE);
 
@@ -110,30 +99,6 @@ export async function fetchLinkedInJobs(
     throw new Error(
       "A coleta do LinkedIn não retornou metadados; não é possível confirmá-la como bem-sucedida.",
     );
-  }
-
-  const jobs: Job[] = [];
-
-  for (const scraped of result.jobs) {
-    const job = toJob(scraped);
-
-    if (!job) {
-      // Aviso genérico: não expõe URL, título nem conteúdo da vaga descartada.
-      console.warn(
-        "Vaga do LinkedIn descartada: URL não-HTTPS, fora do domínio oficial ou ID não identificável.",
-      );
-      continue;
-    }
-
-    jobs.push(job);
-  }
-
-  // Rate limiting (HTTP 429): sinaliza o orquestrador para interromper apenas as
-  // pesquisas restantes do LinkedIn, preservando as vagas já convertidas
-  // (inclusive as de um retorno parcial).
-  const rateLimit = toRateLimitError(SOURCE, siteMeta.status, siteMeta.error, jobs);
-  if (rateLimit) {
-    throw rateLimit;
   }
 
   switch (siteMeta.status) {
@@ -152,6 +117,22 @@ export async function fetchLinkedInJobs(
       break;
     case "error":
       throw new Error(`Falha ao consultar o LinkedIn: ${siteMeta.error.message}`);
+  }
+
+  const jobs: Job[] = [];
+
+  for (const scraped of result.jobs) {
+    const job = toJob(scraped);
+
+    if (!job) {
+      // Aviso genérico: não expõe URL, título nem conteúdo da vaga descartada.
+      console.warn(
+        "Vaga do LinkedIn descartada: URL não-HTTPS, fora do domínio oficial ou ID não identificável.",
+      );
+      continue;
+    }
+
+    jobs.push(job);
   }
 
   return jobs;
@@ -180,7 +161,7 @@ function toJob(scraped: ScrapedJob): Job | undefined {
   const location = scraped.location ?? "";
   const description = scraped.description ?? "";
 
-  const job: Job = {
+  return {
     id,
     title: scraped.title,
     company: scraped.company ?? "",
@@ -189,8 +170,8 @@ function toJob(scraped: ScrapedJob): Job | undefined {
     // inferida dos sinais do próprio anúncio (título/localização/descrição), e
     // não do filtro `isRemote` usado na pesquisa — remoto nessa busca não prova
     // que cada vaga retornada seja remota. `false` significa "não confirmado
-    // como remoto", nunca "presencial". A modalidade estruturada fica em
-    // `workplaceType`, quando o anúncio a informa.
+    // como remoto", nunca "presencial"; ampliar `Job.remote` para um estado
+    // tri-state fica pendente.
     remote:
       classifyJobModality({
         title: scraped.title,
@@ -202,39 +183,6 @@ function toJob(scraped: ScrapedJob): Job | undefined {
     source: SOURCE,
     publishedAt: scraped.datePosted ?? undefined,
   };
-
-  // Campos estruturados do próprio anúncio (não do filtro de pesquisa), apenas
-  // quando disponíveis; nada é inferido por ausência.
-  const contractTypes = toStringList(scraped.jobTypes);
-  if (contractTypes.length > 0) {
-    job.contractTypes = contractTypes;
-  }
-
-  const workplace = resolveStructuredWorkplaceType(scraped);
-  if (workplace !== undefined) {
-    job.workplaceType = workplace;
-  }
-
-  return job;
-}
-
-/**
- * Modalidade estruturada informada pelo próprio anúncio do LinkedIn.
- *
- * Prefere o campo `workFromHomeType`; na sua ausência, usa a confirmação
- * booleana `isRemote === true`. Nunca infere presencial a partir da ausência do
- * sinal de remoto.
- */
-function resolveStructuredWorkplaceType(
-  scraped: ScrapedJob,
-): ReturnType<typeof toWorkplaceType> {
-  const fromField = toWorkplaceType(scraped.workFromHomeType);
-
-  if (fromField !== undefined) {
-    return fromField;
-  }
-
-  return scraped.isRemote === true ? "remote" : undefined;
 }
 
 /**

@@ -1,6 +1,4 @@
 import type { Job } from "../types/job.js";
-import { fetchBoardWithTimeout } from "./board-http.js";
-import { toStringList, toWorkplaceType } from "./normalize.js";
 
 /** Origem das vagas. */
 const SOURCE = "ashby";
@@ -19,8 +17,6 @@ interface AshbyJob {
   location?: string;
   secondaryLocations?: AshbyLocation[];
   workplaceType?: string;
-  /** Tipo de contratação informado pela Ashby (ex.: "FullTime", "Contract"). */
-  employmentType?: string;
   descriptionPlain?: string;
   descriptionHtml?: string;
   publishedAt?: string;
@@ -32,12 +28,9 @@ interface AshbyJob {
 /**
  * Busca as vagas de um Job Board público da Ashby e as normaliza para {@link Job}.
  *
- * Vagas explicitamente não listadas (`isListed === false`) são descartadas. A
- * requisição é limitada ao timeout dos boards públicos (ver
- * {@link fetchBoardWithTimeout}).
+ * Vagas explicitamente não listadas (`isListed === false`) são descartadas.
  *
  * @param boardName Identificador do Job Board na Ashby (ex.: "Ashby").
- * @throws {BoardTimeoutError} Se a requisição exceder o timeout.
  * @throws {Error} Se a resposta HTTP for de erro ou o corpo for inválido.
  */
 export async function fetchAshbyJobs(boardName: string): Promise<Job[]> {
@@ -45,28 +38,24 @@ export async function fetchAshbyJobs(boardName: string): Promise<Job[]> {
     throw new Error("Ashby board name is required.");
   }
 
-  const postings = await fetchBoardWithTimeout(
+  const response = await fetch(
     `${API_BASE_URL}/${encodeURIComponent(boardName)}`,
-    SOURCE,
-    async (response) => {
-      if (!response.ok) {
-        throw new Error(
-          `Falha ao consultar a Ashby (board "${boardName}"): ${response.status} ${response.statusText}`,
-        );
-      }
-
-      const data = (await response.json()) as { jobs?: unknown } | null;
-      const body = data?.jobs;
-
-      if (!Array.isArray(body)) {
-        throw new Error(
-          `Ashby API retornou uma resposta inválida (board "${boardName}").`,
-        );
-      }
-
-      return body;
-    },
   );
+
+  if (!response.ok) {
+    throw new Error(
+      `Falha ao consultar a Ashby (board "${boardName}"): ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const data = (await response.json()) as { jobs?: unknown } | null;
+  const postings = data?.jobs;
+
+  if (!Array.isArray(postings)) {
+    throw new Error(
+      `Ashby API retornou uma resposta inválida (board "${boardName}").`,
+    );
+  }
 
   return postings
     .filter((posting) => !isUnlisted(posting))
@@ -82,7 +71,7 @@ function toJob(posting: unknown, boardName: string): Job {
   // URL canônica da vaga, base do identificador estável.
    const url = posting.jobUrl?.trim() || posting.applyUrl?.trim() || "";
 
-  const job: Job = {
+  return {
     id: `${boardName}:${url}`,
     title: posting.title,
     company: boardName,
@@ -93,41 +82,6 @@ function toJob(posting: unknown, boardName: string): Job {
     source: SOURCE,
     publishedAt: posting.publishedAt,
   };
-
-  // Campos estruturados: preservados apenas quando a fonte os fornece.
-  const workplaceType = toWorkplaceType(posting.workplaceType);
-  if (workplaceType !== undefined) {
-    job.workplaceType = workplaceType;
-  }
-
-  const contractTypes = toStringList([posting.employmentType]);
-  if (contractTypes.length > 0) {
-    job.contractTypes = contractTypes;
-  }
-
-  const additionalLocations = collectAdditionalLocations(posting);
-  if (additionalLocations.length > 0) {
-    job.additionalLocations = additionalLocations;
-  }
-
-  return job;
-}
-
-/**
- * Localidades secundárias informadas pela Ashby, sem repetir a principal.
- *
- * A localidade principal já é composta em `location` (com as secundárias
- * concatenadas); aqui elas são expostas separadamente, de forma estruturada.
- */
-function collectAdditionalLocations(job: AshbyJob): string[] {
-  const primary = job.location?.trim().toLowerCase() ?? "";
-  const secondary = (job.secondaryLocations ?? []).map(
-    (entry) => entry.location,
-  );
-
-  return toStringList(secondary).filter(
-    (value) => value.toLowerCase() !== primary,
-  );
 }
 
 /** Junta a localização principal e as secundárias, sem inferir elegibilidade. */

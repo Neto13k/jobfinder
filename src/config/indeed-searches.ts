@@ -10,7 +10,7 @@ export interface IndeedJobSource extends IndeedSearchParams {
   provider: "indeed";
 }
 
-/** Limite de vagas por pesquisa, igual em todas as 110 configurações. */
+/** Limite de vagas por pesquisa, igual em todas as 100 configurações. */
 export const INDEED_RESULTS_WANTED = 15;
 
 /** Localização das pesquisas de Maceió/AL (presencial, híbrido e remoto). */
@@ -20,12 +20,12 @@ const LOCAL_LOCATION = "Maceió, AL";
 const REMOTE_LOCATION = "Brazil";
 
 /**
- * 22 termos locais de Maceió/AL.
+ * 20 termos locais de Maceió/AL.
  *
  * Sem `isRemote` para cobrir presencial, híbrido e remoto. Evitam-se termos
- * genéricos e vagas de nível pleno/sênior; cobrem desenvolvimento júnior,
- * estágio e cargos de software sem senioridade explícita (ex.: "desenvolvedor
- * de software").
+ * genéricos e vagas de nível pleno/sênior; cobrem desenvolvimento júnior e
+ * estágio em full stack, front-end, back-end, React, Node.js, TypeScript,
+ * JavaScript e engenharia de software.
  */
 const LOCAL_TERMS = [
   "desenvolvedor júnior",
@@ -48,17 +48,12 @@ const LOCAL_TERMS = [
   "junior software engineer",
   "junior full stack developer",
   "junior frontend developer",
-  "desenvolvedor de software",
-  "estágio em tecnologia",
 ] as const;
 
 /**
- * 88 termos remotos nacionais: variações em português e inglês de júnior e
+ * 80 termos remotos nacionais, com variações em português e inglês de júnior e
  * estágio (desenvolvedor, full stack, front-end, back-end, React, Node.js,
- * JavaScript, TypeScript, web e engenharia de software) e também termos de
- * cargo sem senioridade explícita (ex.: "software engineer", "react
- * developer"), que dependem da triagem de senioridade posterior. Sem
- * duplicatas.
+ * JavaScript, TypeScript, web e engenharia de software). Sem duplicatas.
  */
 const REMOTE_TERMS = [
   "desenvolvedor júnior",
@@ -141,17 +136,9 @@ const REMOTE_TERMS = [
   "software engineering internship",
   "software engineer intern",
   "developer intern",
-  "software engineer",
-  "react developer",
-  "node.js developer",
-  "javascript developer",
-  "typescript developer",
-  "full stack developer",
-  "frontend developer",
-  "backend developer",
 ] as const;
 
-/** 22 pesquisas locais de Maceió/AL, abertas a presencial, híbrido e remoto. */
+/** 20 pesquisas locais de Maceió/AL, abertas a presencial, híbrido e remoto. */
 export const INDEED_LOCAL_SEARCHES: readonly IndeedJobSource[] =
   LOCAL_TERMS.map(
     (searchTerm): IndeedJobSource => ({
@@ -162,7 +149,7 @@ export const INDEED_LOCAL_SEARCHES: readonly IndeedJobSource[] =
     }),
   );
 
-/** 88 pesquisas remotas disponíveis para candidatos no Brasil. */
+/** 80 pesquisas remotas disponíveis para candidatos no Brasil. */
 export const INDEED_REMOTE_SEARCHES: readonly IndeedJobSource[] =
   REMOTE_TERMS.map(
     (searchTerm): IndeedJobSource => ({

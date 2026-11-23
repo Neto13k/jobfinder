@@ -5,7 +5,7 @@ import {
 import type { LinkedInJobSource } from "../config/job-sources.js";
 
 /** Total de lotes distintos; define o ciclo da rotação. */
-export const LINKEDIN_TOTAL_BATCHES = 22;
+export const LINKEDIN_TOTAL_BATCHES = 20;
 
 /** Pesquisas remotas por lote; as demais posições do lote são a pesquisa local. */
 export const LINKEDIN_REMOTES_PER_BATCH = 4;
@@ -25,14 +25,14 @@ export interface LinkedInBatch {
   searches: LinkedInJobSource[];
 }
 
-// A rotação só é válida com exatamente 22 locais e 88 remotas (22 lotes de 5).
+// A rotação só é válida com exatamente 20 locais e 80 remotas (20 lotes de 5).
 if (
   LINKEDIN_LOCAL_SEARCHES.length !== LINKEDIN_TOTAL_BATCHES ||
   LINKEDIN_REMOTE_SEARCHES.length !==
     LINKEDIN_TOTAL_BATCHES * LINKEDIN_REMOTES_PER_BATCH
 ) {
   throw new Error(
-    "Matriz de pesquisas do LinkedIn inválida: esperado 22 locais e 88 remotas, " +
+    "Matriz de pesquisas do LinkedIn inválida: esperado 20 locais e 80 remotas, " +
       `recebido ${LINKEDIN_LOCAL_SEARCHES.length} e ${LINKEDIN_REMOTE_SEARCHES.length}.`,
   );
 }
@@ -43,7 +43,7 @@ if (
  * Determinístico e sem estado: converte a data em horas UTC absolutas desde a
  * época (epoch ÷ 1 h) e aplica módulo {@link LINKEDIN_TOTAL_BATCHES}, de modo
  * que cada hora do calendário mapeie sempre para o mesmo lote e o ciclo se
- * repita a cada 22 horas. Execuções na mesma hora repetem o mesmo lote e nada
+ * repita a cada 20 horas. Execuções na mesma hora repetem o mesmo lote e nada
  * precisa ser persistido entre execuções.
  *
  * @param date Data de referência (padrão: agora). Recebida como parâmetro para

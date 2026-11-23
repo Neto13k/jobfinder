@@ -1,13 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { query } from "../db/postgres.js";
-import { getStorageBackend, withStorageLock } from "./storage.js";
 import type { Job } from "../types/job.js";
-
-// Histórico de vagas notificadas no modo JSON (relativo ao cwd) — ignorado pelo Git.
-const JSON_HISTORY_FILE = ["data", "notified-jobs.json"];
 
 /** Estado de entrega de uma notificação. */
 export type NotificationStatus = "pending" | "sent";
@@ -89,275 +83,6 @@ export function deduplicateJobs(jobs: Job[]): Job[] {
   });
 }
 
-/** Referência mínima de um anúncio agrupado, preservada para auditoria. */
-export interface EquivalentJobRef {
-  key: string;
-  id: string;
-  source: string;
-  url: string;
-  location: string;
-}
-
-/** Grupo de anúncios considerados equivalentes (mesma vaga anunciada 2+ vezes). */
-export interface EquivalentGroup {
-  /** Assinatura determinística que reúne os anúncios equivalentes. */
-  signature: string;
-  /** Chave "source:id" do anúncio mantido (representante do grupo). */
-  representativeKey: string;
-  /** Anúncios removidos por equivalência com o representante. */
-  members: EquivalentJobRef[];
-}
-
-/** Resultado do agrupamento conservador por equivalência. */
-export interface EquivalentGrouping {
-  /** Anúncios mantidos (representantes e não agrupáveis). */
-  jobs: Job[];
-  /** Grupos com ao menos um membro removido. */
-  groups: EquivalentGroup[];
-}
-
-// Descrição mínima (caracteres normalizados) para admitir agrupamento. Anúncios
-// com descrição genérica, vazia ou insuficiente NUNCA são agrupados: não há
-// como comprovar equivalência.
-const MIN_EQUIVALENT_DESCRIPTION = 80;
-
-// Número mínimo de termos DISTINTOS na descrição. É a evidência substantiva
-// além do comprimento: um texto longo porém repetitivo ou genérico não comprova
-// que os anúncios são a mesma vaga.
-const MIN_EQUIVALENT_DISTINCT_TOKENS = 10;
-
-/** Normaliza acentos, espaços e letras maiúsculas para comparar conteúdo. */
-function normalizeText(text: string): string {
-  return text
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Conta os termos distintos relevantes (>= 4 caracteres) de um texto.
- *
- * Serve como evidência substantiva de conteúdo: descrições repetitivas ou de
- * preenchimento têm poucos termos distintos e não devem comprovar equivalência.
- */
-function substantiveDistinctTokens(text: string): number {
-  const tokens = new Set(
-    text
-      .split(/\s+/)
-      .map((token) => token.replace(/[^a-z0-9]/g, ""))
-      .filter((token) => token.length >= 4),
-  );
-
-  return tokens.size;
-}
-
-/**
- * Calcula a assinatura de equivalência de um anúncio.
- *
- * Reúne empresa, título, descrição substantiva, modalidade, localidades e
- * contratação. Retorna null quando o anúncio NÃO é agrupável (empresa ou título
- * ausente, descrição insuficiente em comprimento OU em termos distintos), o que
- * impede agrupar apenas por coincidência de título e empresa. A modalidade
- * integra a assinatura: diferenças de modalidade NUNCA são agrupadas.
- */
-function equivalenceSignature(job: Job): string | null {
-  const company = normalizeText(job.company ?? "");
-  const title = normalizeText(job.title ?? "");
-  const description = normalizeText(job.description ?? "");
-
-  if (
-    !company ||
-    !title ||
-    description.length < MIN_EQUIVALENT_DESCRIPTION ||
-    substantiveDistinctTokens(description) < MIN_EQUIVALENT_DISTINCT_TOKENS
-  ) {
-    return null;
-  }
-
-  const modality =
-    job.workplaceType ?? (job.remote === true ? "remote" : "unknown");
-
-  const locations = [job.location ?? "", ...(job.additionalLocations ?? [])]
-    .filter((value): value is string => typeof value === "string")
-    .map(normalizeText)
-    .filter(Boolean)
-    .sort()
-    .join("|");
-
-  const contracts = (job.contractTypes ?? [])
-    .filter((value): value is string => typeof value === "string")
-    .map(normalizeText)
-    .sort()
-    .join("|");
-
-  const payload = [
-    company,
-    title,
-    `remote:${modality}`,
-    `loc:${locations}`,
-    `contract:${contracts}`,
-    description,
-  ].join("\u0000");
-
-  return createHash("sha256").update(payload).digest("hex");
-}
-
-/**
- * Agrupa anúncios equivalentes de forma conservadora.
- *
- * Dois anúncios só são agrupados quando coincidem em empresa, título
- * normalizado, descrição substantiva, modalidade, localidades e contratação. O
- * representante de cada grupo é escolhido de forma ESTÁVEL: o anúncio de menor
- * chave "source:id" (ordenação lexicográfica), independentemente da ordem de
- * entrada. Assim, o mesmo conjunto de anúncios produz sempre o mesmo
- * representante e o mesmo conjunto de membros. A identidade persistida
- * ("source:id") é preservada; os demais são registrados como membros do grupo,
- * com identificadores, URLs e localidades para auditoria.
- *
- * @param jobs Vagas já deduplicadas por identidade ("source:id").
- * @returns As vagas mantidas e os grupos com membros removidos.
- */
-export function groupEquivalentJobs(jobs: Job[]): EquivalentGrouping {
-  const buckets = new Map<string, Job[]>();
-  const kept: Job[] = [];
-
-  for (const job of jobs) {
-    const signature = equivalenceSignature(job);
-
-    // Sem assinatura: não agrupável; permanece na ordem de entrada.
-    if (!signature) {
-      kept.push(job);
-      continue;
-    }
-
-    const bucket = buckets.get(signature);
-    if (bucket) {
-      bucket.push(job);
-    } else {
-      buckets.set(signature, [job]);
-    }
-  }
-
-  const groups: EquivalentGroup[] = [];
-
-  // Ordena as chaves para manter a saída determinística.
-  for (const signature of [...buckets.keys()].sort()) {
-    const members = buckets.get(signature) ?? [];
-
-    if (members.length === 1) {
-      kept.push(members[0]);
-      continue;
-    }
-
-    // Representante estável: menor chave "source:id", independente da ordem.
-    const sorted = [...members].sort((a, b) => {
-      const keyA = generateJobKey(a);
-      const keyB = generateJobKey(b);
-      return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
-    });
-    const [representative, ...removed] = sorted;
-
-    kept.push(representative);
-    groups.push({
-      signature,
-      representativeKey: generateJobKey(representative),
-      members: removed.map((job) => ({
-        key: generateJobKey(job),
-        id: job.id,
-        source: job.source,
-        url: job.url,
-        location: job.location,
-      })),
-    });
-  }
-
-  return { jobs: kept, groups };
-}
-
-/** Normaliza um item do histórico JSON, aceitando o formato legado (string). */
-function normalizeJsonEntry(value: unknown): NotifiedJobRecord | undefined {
-  // Formato legado: apenas a chave, sempre tratada como já notificada.
-  if (typeof value === "string") {
-    return value.trim() === ""
-      ? undefined
-      : { key: value, status: "sent", reservedBy: null, reservedAt: null };
-  }
-
-  if (typeof value !== "object" || value === null) {
-    return undefined;
-  }
-
-  const record = value as Record<string, unknown>;
-  if (typeof record.key !== "string" || record.key.trim() === "") {
-    return undefined;
-  }
-
-  return {
-    key: record.key,
-    status: record.status === "pending" ? "pending" : "sent",
-    reservedBy: typeof record.reservedBy === "string" ? record.reservedBy : null,
-    reservedAt: typeof record.reservedAt === "string" ? record.reservedAt : null,
-  };
-}
-
-// Lê o histórico JSON; somente arquivo inexistente conta como lista vazia.
-async function readJsonHistory(): Promise<NotifiedJobRecord[]> {
-  const file = join(process.cwd(), ...JSON_HISTORY_FILE);
-  let content: string;
-
-  try {
-    content = await readFile(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-
-    throw error;
-  }
-
-  // Arquivo existente porém vazio indica perda do histórico: não apaga nada.
-  if (content.trim() === "") {
-    throw new Error(
-      `Histórico de notificações vazio (possível perda de dados): ${file}`,
-    );
-  }
-
-  let data: unknown;
-  try {
-    data = JSON.parse(content);
-  } catch {
-    // Não sobrescreve nem apaga: apenas sinaliza o problema.
-    throw new Error(
-      `Histórico de notificações corrompido (JSON inválido): ${file}`,
-    );
-  }
-
-  if (!Array.isArray(data)) {
-    throw new Error(
-      `Histórico de notificações corrompido (formato inesperado): ${file}`,
-    );
-  }
-
-  return data.map((item) => {
-    const record = normalizeJsonEntry(item);
-    if (!record) {
-      throw new Error(
-        `Histórico de notificações corrompido (registro inválido): ${file}`,
-      );
-    }
-    return record;
-  });
-}
-
-// Grava o histórico JSON, criando a pasta quando necessário.
-async function writeJsonHistory(records: NotifiedJobRecord[]): Promise<void> {
-  const file = join(process.cwd(), ...JSON_HISTORY_FILE);
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(records, null, 2)}\n`, "utf8");
-}
-
 /**
  * Indica se a vaga já possui reserva ou notificação registrada.
  *
@@ -369,17 +94,11 @@ async function writeJsonHistory(records: NotifiedJobRecord[]): Promise<void> {
  */
 export async function isJobNotified(job: Job): Promise<boolean> {
   const key = generateJobKey(job);
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      "select 1 from public.notified_jobs where key = $1 limit 1",
-      [key],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  const records = await readJsonHistory();
-  return records.some((record) => record.key === key);
+  const { rowCount } = await query(
+    "select 1 from public.notified_jobs where key = $1 limit 1",
+    [key],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
@@ -391,41 +110,21 @@ export async function isJobNotified(job: Job): Promise<boolean> {
  *
  * @param job Vaga a reservar.
  * @returns A reserva obtida ou undefined se a vaga já estava reservada/notificada.
- * @throws Error se o backend de persistência estiver indisponível.
+ * @throws Error se o PostgreSQL estiver indisponível.
  */
 export async function reserveJobNotification(
   job: Job,
 ): Promise<NotificationReservation | undefined> {
   const key = generateJobKey(job);
   const token = randomUUID();
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `insert into public.notified_jobs (key, status, reserved_by, reserved_at)
-       values ($1, 'pending', $2, now())
-       on conflict (key) do nothing
-       returning key`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0 ? { key, token } : undefined;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-
-    if (records.some((record) => record.key === key)) {
-      return undefined;
-    }
-
-    records.push({
-      key,
-      status: "pending",
-      reservedBy: token,
-      reservedAt: new Date().toISOString(),
-    });
-    await writeJsonHistory(records);
-    return { key, token };
-  });
+  const { rowCount } = await query(
+    `insert into public.notified_jobs (key, status, reserved_by, reserved_at)
+     values ($1, 'pending', $2, now())
+     on conflict (key) do nothing
+     returning key`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0 ? { key, token } : undefined;
 }
 
 /**
@@ -441,30 +140,13 @@ export async function confirmJobNotification(
   reservation: NotificationReservation,
 ): Promise<boolean> {
   const { key, token } = reservation;
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `update public.notified_jobs
-          set status = 'sent', notified_at = now()
-        where key = $1 and status = 'pending' and reserved_by = $2`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find((item) => item.key === key);
-
-    if (!record || record.status !== "pending" || record.reservedBy !== token) {
-      return false;
-    }
-
-    record.status = "sent";
-    record.reservedBy = null;
-    await writeJsonHistory(records);
-    return true;
-  });
+  const { rowCount } = await query(
+    `update public.notified_jobs
+        set status = 'sent', notified_at = now()
+      where key = $1 and status = 'pending' and reserved_by = $2`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
@@ -480,33 +162,18 @@ export async function releaseJobNotification(
   reservation: NotificationReservation,
 ): Promise<boolean> {
   const { key, token } = reservation;
-
-  if (getStorageBackend() === "postgres") {
-    const { rowCount } = await query(
-      `delete from public.notified_jobs
-        where key = $1 and status = 'pending' and reserved_by = $2`,
-      [key, token],
-    );
-    return (rowCount ?? 0) > 0;
-  }
-
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find((item) => item.key === key);
-
-    if (!record || record.status !== "pending" || record.reservedBy !== token) {
-      return false;
-    }
-
-    await writeJsonHistory(records.filter((item) => item.key !== key));
-    return true;
-  });
+  const { rowCount } = await query(
+    `delete from public.notified_jobs
+      where key = $1 and status = 'pending' and reserved_by = $2`,
+    [key, token],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
  * Registra a vaga como notificada (reserva + confirmação).
  *
- * Atalho para scripts e testes; o pipeline principal usa reserveJobNotification
+ * Atalho para scripts; o pipeline principal usa reserveJobNotification
  * e confirmJobNotification para tratar falhas de envio.
  *
  * @param job Vaga a registrar.
@@ -534,34 +201,20 @@ export async function listPendingReservations(
   olderThanMs = 0,
 ): Promise<PendingReservation[]> {
   const cutoff = Date.now() - olderThanMs;
+  const { rows } = await query<NotifiedJobRow>(
+    `select key, status, reserved_by, reserved_at
+       from public.notified_jobs
+      where status = 'pending'
+      order by reserved_at asc nulls first`,
+  );
 
-  let pending: PendingReservation[];
+  const pending = rows.map((row) => ({
+    key: row.key,
+    reservedBy: row.reserved_by,
+    reservedAt: row.reserved_at ? new Date(row.reserved_at).toISOString() : null,
+  }));
 
-  if (getStorageBackend() === "postgres") {
-    const { rows } = await query<NotifiedJobRow>(
-      `select key, status, reserved_by, reserved_at
-         from public.notified_jobs
-        where status = 'pending'
-        order by reserved_at asc nulls first`,
-    );
-
-    pending = rows.map((row) => ({
-      key: row.key,
-      reservedBy: row.reserved_by,
-      reservedAt: row.reserved_at ? new Date(row.reserved_at).toISOString() : null,
-    }));
-  } else {
-    const records = await readJsonHistory();
-    pending = records
-      .filter((record) => record.status === "pending")
-      .map((record) => ({
-        key: record.key,
-        reservedBy: record.reservedBy,
-        reservedAt: record.reservedAt,
-      }));
-  }
-
-  // Reservas sem timestamp são mantidas: a idade é desconhecida, não nula.
+  // Sem timestamp a idade é desconhecida: a reserva continua na lista.
   return pending.filter(
     (item) => !item.reservedAt || Date.parse(item.reservedAt) <= cutoff,
   );
@@ -581,42 +234,19 @@ export async function resolvePendingReservation(
   key: string,
   resolution: PendingResolution,
 ): Promise<boolean> {
-  if (getStorageBackend() === "postgres") {
-    if (resolution === "sent") {
-      const { rowCount } = await query(
-        `update public.notified_jobs
-            set status = 'sent', notified_at = now()
-          where key = $1 and status = 'pending'`,
-        [key],
-      );
-      return (rowCount ?? 0) > 0;
-    }
-
+  if (resolution === "sent") {
     const { rowCount } = await query(
-      "delete from public.notified_jobs where key = $1 and status = 'pending'",
+      `update public.notified_jobs
+          set status = 'sent', notified_at = now()
+        where key = $1 and status = 'pending'`,
       [key],
     );
     return (rowCount ?? 0) > 0;
   }
 
-  return withStorageLock(async () => {
-    const records = await readJsonHistory();
-    const record = records.find(
-      (item) => item.key === key && item.status === "pending",
-    );
-
-    if (!record) {
-      return false;
-    }
-
-    if (resolution === "sent") {
-      record.status = "sent";
-      record.reservedBy = null;
-      await writeJsonHistory(records);
-    } else {
-      await writeJsonHistory(records.filter((item) => item.key !== key));
-    }
-
-    return true;
-  });
+  const { rowCount } = await query(
+    "delete from public.notified_jobs where key = $1 and status = 'pending'",
+    [key],
+  );
+  return (rowCount ?? 0) > 0;
 }
