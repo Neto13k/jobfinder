@@ -1,6 +1,6 @@
 # JobFinder
 
-**Versão 2.3.0 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
+**Versão 2.3.1 — seis providers: LinkedIn Jobs, Indeed Jobs, Greenhouse, Lever, Ashby e InHire**
 
 O JobFinder é um projeto em **Node.js e TypeScript** que reúne vagas de **59 boards públicos de empresas** (Greenhouse, Lever, Ashby e InHire) e das plataformas de busca **LinkedIn Jobs** e **Indeed Jobs**, aplica filtros de compatibilidade, usa o **Google Gemini** para analisar oportunidades e, quando habilitado, envia alertas pelo **Telegram**. O objetivo é apoiar a descoberta de vagas de desenvolvimento sem realizar candidaturas automaticamente.
 
@@ -122,7 +122,10 @@ O `npm install` executa o `postinstall` (`patch-package`), que aplica o patch lo
 | `JOBFINDER_GEMINI_MIN_INTERVAL_MS` | Intervalo mínimo entre requisições, em milissegundos (piso de `6000` em produção; `0` desativa fora dela) | `6000` |
 | `JOBFINDER_GEMINI_TPM_LIMIT` | Limite conservador de tokens de entrada por minuto (limitado ao teto de `250000`) | `250000` |
 | `JOBFINDER_GEMINI_TIME_BUDGET_MS` | Orçamento de tempo da análise, em milissegundos, desde o início do pipeline | `480000` |
+| `JOBFINDER_GEMINI_MODEL` | Modelo Gemini usado nas análises | `gemini-3.5-flash-lite` |
 | `JOBFINDER_ANALYSIS_DESCRIPTION_BUDGET` | Orçamento (caracteres) da descrição enviada à IA | `4000` |
+| `JOBFINDER_RECENCY_CUTOFF_DAYS` | Limite (dias) de recência; vagas mais antigas saem da análise (sem data/inválida/futura preservadas) | `30` |
+| `JOBFINDER_VERIFY_OPEN_JOBS` | Verificação opt-in de disponibilidade (Greenhouse/Lever); só descarta vagas confirmadamente encerradas | `false` |
 | `JOBFINDER_SEND_NOTIFICATIONS` | Permite o envio real de notificações | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Permite avisos de revisão manual, além do envio geral | `false` |
 | `JOBFINDER_MAX_NOTIFICATIONS` | Limite de notificações por execução (compatíveis antes das de revisão) | `3` (teto de `10`) |
@@ -436,6 +439,7 @@ Em **Settings → Secrets and variables → Actions → Variables**, crie confor
 | `JOBFINDER_SEND_NOTIFICATIONS` | Habilita envios reais | `false` |
 | `JOBFINDER_SEND_REVIEWS` | Habilita avisos de revisão | `false` |
 | `JOBFINDER_MAX_NOTIFICATIONS` | Notificações por execução (1–10) | `3` |
+| `JOBFINDER_RECENCY_CUTOFF_DAYS` | Limite (dias) de recência | `30` |
 | `JOBFINDER_PENDING_JOBS_ENABLED` | Habilita a fila persistente de vagas pendentes | `true` |
 | `JOBFINDER_PENDING_JOB_TTL_DAYS` | Idade máxima (dias) de uma pendência | `7` |
 | `JOBFINDER_PENDING_MAX_JOBS` | Teto de pendências persistidas | `200` |

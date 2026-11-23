@@ -7,6 +7,11 @@ interface TelegramResponse {
   description?: string;
 }
 
+// Tempo máximo de cada requisição ao Telegram, em milissegundos. Um estouro de
+// tempo resulta em resultado INCERTO: a mensagem pode ter sido entregue antes
+// do corte, por isso é tratado como "unknown" (nunca como "não entregue").
+const REQUEST_TIMEOUT_MS = 10_000;
+
 /**
  * Falha no envio ao Telegram com indicação da confiança do resultado.
  *
@@ -176,7 +181,9 @@ async function sendMessage(text: string): Promise<void> {
   // A URL contém o token, por isso nunca é incluída em mensagens de erro.
   const endpoint = `https://api.telegram.org/bot${token}/sendMessage`;
 
-  // Falha de rede/timeout: a requisição pode ter chegado ao Telegram.
+  // Falha de rede/timeout: a requisição pode ter chegado ao Telegram. O
+  // AbortSignal.timeout encerra a requisição presa e cai neste mesmo tratamento
+  // (resultado incerto).
   let response: Response;
   try {
     response = await fetch(endpoint, {
@@ -186,10 +193,11 @@ async function sendMessage(text: string): Promise<void> {
         chat_id: chatId,
         text,
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
     throw new TelegramDeliveryError(
-      "Falha de rede ao enviar notificação ao Telegram (resultado incerto).",
+      "Falha de rede ou tempo esgotado ao enviar notificação ao Telegram (resultado incerto).",
       "unknown",
     );
   }
