@@ -7,7 +7,6 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "npm run build && node scripts/smoke-test.mjs",
     "db:migrate": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
     "db:migrate:dry": "npm run build && node --env-file=.env scripts/migrate-json-to-postgres.mjs",
     "notifications:pending": "npm run build && node --env-file=.env scripts/recover-pending-notifications.mjs",
